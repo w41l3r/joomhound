@@ -1,0 +1,55 @@
+# JoomHound Configuration File
+# Copy this file to ~/.joomhound/config.yaml and customize
+
+# HTTP Configuration
+http:
+  timeout: 30
+  verify_ssl: false
+  rate_limit: 10  # requests per second
+  max_connections: 10
+
+# Proxy Configuration
+proxy:
+  enabled: false
+  url: "http://127.0.0.1:8080"
+  # For SOCKS5: socks5://127.0.0.1:1080
+
+# Output Configuration
+output:
+  format: "markdown"  # json, markdown, xml, text
+  directory: "./results"
+  timestamp: true
+
+# Scan Configuration
+scan:
+  threads: 10
+  follow_redirects: true
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+  custom_headers:
+    X-Custom-Header: "value"
+
+# Enumeration Configuration
+enum:
+  check_version: true
+  check_components: true
+  check_templates: true
+  check_plugins: true
+  check_cves: true
+
+# Brute-force Configuration
+bruteforce:
+  threads: 5  # Lower for brute-force to avoid lockout
+  max_retries: 3
+  delay_between_attempts: 1000  # milliseconds
+  backoff_factor: 2.0
+
+# User Enumeration
+users:
+  method: "registration"  # registration, api, error_messages, profiles
+  threads: 10
+
+# Wordlists
+wordlists:
+  users: "/usr/share/wordlists/users.txt"
+  passwords: "/usr/share/wordlists/rockyou.txt"
+  components: "internal/data/components.txt"
