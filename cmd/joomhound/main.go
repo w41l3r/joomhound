@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lfgrillo83/joomhound/cmd/joomhound/commands"
+	"github.com/w41l3r/joomhound/cmd/joomhound/commands"
 )
 
 func main() {

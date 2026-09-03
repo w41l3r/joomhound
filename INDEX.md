@@ -214,8 +214,8 @@ Post-Exploitation → Reporting
 ## 🔗 External Resources
 
 ### Official
-- GitHub: https://github.com/lfgrillo83/joomhound
-- Issues: https://github.com/lfgrillo83/joomhound/issues
+- GitHub: https://github.com/w41l3r/joomhound
+- Issues: https://github.com/w41l3r/joomhound/issues
 
 ### Alternatives Analyzed
 - droopescan: https://github.com/droope/droopescan

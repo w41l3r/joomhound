@@ -17,8 +17,8 @@ Uma ferramenta de enumeração e brute-force de Joomla de última geração, com
 ## Instalação
 
 ```bash
-go get -u github.com/lfgrillo83/joomhound
-go install github.com/lfgrillo83/joomhound@latest
+go get -u github.com/w41l3r/joomhound
+go install github.com/w41l3r/joomhound@latest
 ```
 
 ## Uso Rápido

@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/lfgrillo83/joomhound/internal/models"
+	"github.com/w41l3r/joomhound/internal/models"
 )
 
 type Formatter struct {
@@ -195,10 +194,54 @@ func (f *Formatter) toText(result *models.ScanResult) (string, error) {
 		sb.WriteString("    [-] No users enumerated\n")
 	}
 
+	// Vulnerabilities. The text formatter previously omitted this section
+	// entirely, so `-o report.txt` silently dropped every CVE finding.
+	sb.WriteString("\n[*] Vulnerabilities\n")
+	if len(result.Vulnerabilities) > 0 {
+		for _, v := range result.Vulnerabilities {
+			sb.WriteString(fmt.Sprintf("    [!] %s  CVSS %.1f (%s)\n", v.CVE, v.CVSS, v.SeverityOrDerived()))
+			if v.Title != "" {
+				sb.WriteString(fmt.Sprintf("        %s\n", v.Title))
+			}
+			if v.Confidence != "" {
+				sb.WriteString(fmt.Sprintf("        Confidence: %s\n", v.Confidence))
+			}
+			if len(v.Affected) > 0 {
+				sb.WriteString(fmt.Sprintf("        Affected: %s\n", strings.Join(v.Affected, ", ")))
+			}
+			if v.Reference != "" {
+				sb.WriteString(fmt.Sprintf("        Ref: %s\n", v.Reference))
+			}
+		}
+	} else {
+		sb.WriteString("    [-] No vulnerabilities correlated\n")
+	}
+
 	// Metadata
-	sb.WriteString(fmt.Sprintf("\n[*] Statistics\n"))
+	sb.WriteString("\n[*] Statistics\n")
 	sb.WriteString(fmt.Sprintf("    [+] Duration: %s\n", result.Metadata.Duration))
-	sb.WriteString(fmt.Sprintf("    [+] HTTP Requests: %d\n", result.Metadata.HTTPRequests))
+	sb.WriteString(fmt.Sprintf("    [+] HTTP Requests: %d (errors: %d, retries: %d)\n",
+		result.Metadata.HTTPRequests, result.Metadata.HTTPErrors, result.Metadata.HTTPRetries))
+	if result.Metadata.CVESource != "" {
+		sb.WriteString(fmt.Sprintf("    [+] CVE Source: %s\n", result.Metadata.CVESource))
+	}
+	if result.Metadata.BreakerTripped > 0 {
+		sb.WriteString(fmt.Sprintf("    [!] Circuit breaker tripped %d time(s) - results may be incomplete\n",
+			result.Metadata.BreakerTripped))
+	}
+
+	if len(result.Metadata.Warnings) > 0 {
+		sb.WriteString("\n[*] Warnings\n")
+		for _, w := range result.Metadata.Warnings {
+			sb.WriteString(fmt.Sprintf("    [!] %s\n", w))
+		}
+	}
+	if len(result.Metadata.Errors) > 0 {
+		sb.WriteString("\n[*] Errors\n")
+		for _, e := range result.Metadata.Errors {
+			sb.WriteString(fmt.Sprintf("    [x] %s\n", e))
+		}
+	}
 
 	sb.WriteString("\n================================\n\n")
 

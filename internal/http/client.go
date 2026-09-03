@@ -1,44 +1,122 @@
 package http
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
-type ClientConfig struct {
-	Timeout            time.Duration
-	ProxyURL           string
-	VerifySSL          bool
-	UserAgent          string
-	RateLimit          float64 // requests per second
-	MaxConnections     int
-	CustomHeaders      map[string]string
-	FollowRedirects    bool
+// Defaults applied when a ClientConfig field is left zero.
+const (
+	DefaultTimeout     = 20 * time.Second
+	DefaultMaxBodySize = 8 << 20 // 8 MiB - bounds memory per response
+	DefaultRateLimit   = 10.0
+	DefaultMaxRetries  = 2
+)
+
+// allowedProxySchemes is the whitelist of proxy schemes we accept. Anything
+// else (file://, gopher://, an empty scheme, ...) is rejected up front instead
+// of silently producing a client that cannot dial.
+var allowedProxySchemes = map[string]bool{
+	"http":   true,
+	"https":  true,
+	"socks5": true,
 }
 
+// ClientConfig configures a Client.
+type ClientConfig struct {
+	Timeout   time.Duration
+	ProxyURL  string
+	VerifySSL bool
+	UserAgent string
+
+	// RateLimit is the sustained requests-per-second ceiling across the whole
+	// client. Zero means unlimited.
+	RateLimit float64
+	// Burst is the token-bucket burst size. Defaults to ceil(RateLimit) so a
+	// short spike is tolerated without breaking the sustained average.
+	Burst int
+
+	// MaxConnections bounds pooled connections. It should match the scan's
+	// worker count, otherwise workers fight over too few sockets.
+	MaxConnections int
+
+	CustomHeaders   map[string]string
+	FollowRedirects bool
+
+	// MaxBodySize caps how much of a response body we buffer.
+	MaxBodySize int64
+
+	// MaxRetries is the number of retries after the first attempt for
+	// transient failures (network error, 429, 5xx).
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
+	// EnableCookies gives the client a cookie jar. Required for anything that
+	// depends on a Joomla session (CSRF tokens, login).
+	EnableCookies bool
+
+	// Breaker configures the circuit breaker. Zero value = disabled.
+	Breaker BreakerConfig
+}
+
+// Stats are the counters a Client accumulates. Read them with Client.Stats.
+type Stats struct {
+	Requests    int64
+	Errors      int64
+	Retries     int64
+	RateLimited int64
+	BytesRead   int64
+}
+
+// Client is a rate-limited, retrying, circuit-broken HTTP client shared by all
+// scan phases. It is safe for concurrent use.
 type Client struct {
 	httpClient *http.Client
 	limiter    *rate.Limiter
+	breaker    *CircuitBreaker
 	config     ClientConfig
+
+	requests    atomic.Int64
+	errors      atomic.Int64
+	retries     atomic.Int64
+	rateLimited atomic.Int64
+	bytesRead   atomic.Int64
 }
 
+// NewClient builds a Client from config, applying defaults and validating the
+// proxy URL.
 func NewClient(config ClientConfig) (*Client, error) {
-	if config.Timeout == 0 {
-		config.Timeout = 30 * time.Second
+	if config.Timeout <= 0 {
+		config.Timeout = DefaultTimeout
 	}
 	if config.UserAgent == "" {
-		config.UserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+		config.UserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 	}
-	if config.MaxConnections == 0 {
+	if config.MaxConnections <= 0 {
 		config.MaxConnections = 10
+	}
+	if config.MaxBodySize <= 0 {
+		config.MaxBodySize = DefaultMaxBodySize
+	}
+	if config.MaxRetries < 0 {
+		config.MaxRetries = 0
+	}
+	if config.RetryBaseDelay <= 0 {
+		config.RetryBaseDelay = 250 * time.Millisecond
 	}
 
 	transport := &http.Transport{
@@ -46,30 +124,55 @@ func NewClient(config ClientConfig) (*Client, error) {
 			Timeout:   config.Timeout,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:       config.MaxConnections,
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:    90 * time.Second,
+		// Pool sizing must track the worker count: with the old hardcoded
+		// MaxIdleConnsPerHost=2 every extra worker paid for a fresh TCP+TLS
+		// handshake on every request.
+		MaxIdleConns:          config.MaxConnections,
+		MaxIdleConnsPerHost:   config.MaxConnections,
+		MaxConnsPerHost:       config.MaxConnections * 2,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: config.Timeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
 	}
 
-	// Handle proxy
 	if config.ProxyURL != "" {
 		proxyURL, err := url.Parse(config.ProxyURL)
 		if err != nil {
-			return nil, fmt.Errorf("invalid proxy URL: %w", err)
+			return nil, fmt.Errorf("invalid proxy URL %q: %w", config.ProxyURL, err)
+		}
+		if proxyURL.Host == "" {
+			return nil, fmt.Errorf("invalid proxy URL %q: missing host (expected scheme://host:port)", config.ProxyURL)
+		}
+		if !allowedProxySchemes[strings.ToLower(proxyURL.Scheme)] {
+			return nil, fmt.Errorf("unsupported proxy scheme %q: use http, https or socks5", proxyURL.Scheme)
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
-	// Handle SSL verification
 	if !config.VerifySSL {
+		// Intentional for pentest targets with self-signed certs. Callers are
+		// expected to surface this to the operator.
 		transport.TLSClientConfig = &tls.Config{
 			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS10,
 		}
+	} else {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
 	httpClient := &http.Client{
 		Transport: transport,
 		Timeout:   config.Timeout,
+	}
+
+	if config.EnableCookies {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating cookie jar: %w", err)
+		}
+		httpClient.Jar = jar
 	}
 
 	if !config.FollowRedirects {
@@ -80,82 +183,287 @@ func NewClient(config ClientConfig) (*Client, error) {
 
 	var limiter *rate.Limiter
 	if config.RateLimit > 0 {
-		limiter = rate.NewLimiter(rate.Limit(config.RateLimit), 1)
+		burst := config.Burst
+		if burst <= 0 {
+			burst = int(config.RateLimit)
+			if burst < 1 {
+				burst = 1
+			}
+		}
+		limiter = rate.NewLimiter(rate.Limit(config.RateLimit), burst)
 	}
 
 	return &Client{
 		httpClient: httpClient,
 		limiter:    limiter,
+		breaker:    NewCircuitBreaker(config.Breaker),
 		config:     config,
 	}, nil
 }
 
+// NewSession returns a Client that shares this client's transport, rate
+// limiter and circuit breaker but owns a fresh cookie jar. Use it whenever a
+// request sequence needs its own Joomla session (a login attempt) without
+// escaping the global rate limit.
+func (c *Client) NewSession() (*Client, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating cookie jar: %w", err)
+	}
+
+	inner := &http.Client{
+		Transport:     c.httpClient.Transport,
+		Timeout:       c.httpClient.Timeout,
+		CheckRedirect: c.httpClient.CheckRedirect,
+		Jar:           jar,
+	}
+
+	return &Client{
+		httpClient: inner,
+		limiter:    c.limiter, // shared on purpose
+		breaker:    c.breaker, // shared on purpose
+		config:     c.config,
+	}, nil
+}
+
+// Response is a fully-buffered HTTP response.
 type Response struct {
 	StatusCode int
 	Headers    http.Header
 	Body       []byte
+	// FinalURL is the URL that actually served the response after redirects.
+	FinalURL string
+	// Truncated reports whether the body hit MaxBodySize.
+	Truncated bool
+	// Elapsed is the wall time of the successful attempt.
+	Elapsed time.Duration
 }
 
-func (c *Client) Get(targetURL string) (*Response, error) {
-	return c.Do("GET", targetURL, nil, nil)
+// Get issues a GET.
+func (c *Client) Get(ctx context.Context, targetURL string) (*Response, error) {
+	return c.Do(ctx, http.MethodGet, targetURL, nil, nil)
 }
 
-func (c *Client) Post(targetURL string, data []byte, contentType string) (*Response, error) {
-	return c.Do("POST", targetURL, data, map[string]string{"Content-Type": contentType})
+// PostForm issues a urlencoded POST.
+func (c *Client) PostForm(ctx context.Context, targetURL string, form url.Values) (*Response, error) {
+	return c.Do(ctx, http.MethodPost, targetURL, []byte(form.Encode()),
+		map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
 }
 
-func (c *Client) Do(method string, targetURL string, body []byte, headers map[string]string) (*Response, error) {
-	// Rate limiting
-	if c.limiter != nil {
-		c.limiter.Wait(nil)
+// Post issues a POST with an explicit content type.
+func (c *Client) Post(ctx context.Context, targetURL string, data []byte, contentType string) (*Response, error) {
+	return c.Do(ctx, http.MethodPost, targetURL, data, map[string]string{"Content-Type": contentType})
+}
+
+// Do performs a request with rate limiting, circuit breaking and bounded
+// retries. ctx cancels the whole operation, including waits.
+func (c *Client) Do(ctx context.Context, method, targetURL string, body []byte, headers map[string]string) (*Response, error) {
+	if ctx == nil {
+		return nil, errors.New("http: nil context")
 	}
 
-	req, err := http.NewRequest(method, targetURL, nil)
+	var lastErr error
+
+	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.retries.Add(1)
+			if err := sleepCtx(ctx, c.backoff(attempt, lastErr)); err != nil {
+				return nil, err
+			}
+		}
+
+		// Reject early if the target is already known to be failing.
+		if err := c.breaker.Allow(); err != nil {
+			return nil, err
+		}
+
+		// Rate limit. Wait honours ctx, unlike the previous Wait(nil) which
+		// dereferenced a nil interface and panicked.
+		if c.limiter != nil {
+			if err := c.limiter.Wait(ctx); err != nil {
+				return nil, fmt.Errorf("rate limiter: %w", err)
+			}
+		}
+
+		resp, retryable, err := c.attempt(ctx, method, targetURL, body, headers)
+		if err == nil {
+			c.breaker.Success()
+			return resp, nil
+		}
+
+		lastErr = err
+		c.errors.Add(1)
+		c.breaker.Failure()
+
+		// A cancelled context is never retryable.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !retryable {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("after %d attempts: %w", c.config.MaxRetries+1, lastErr)
+}
+
+// attempt performs one HTTP round trip. retryable tells Do whether another
+// attempt could plausibly succeed.
+func (c *Client) attempt(ctx context.Context, method, targetURL string, body []byte, headers map[string]string) (resp *Response, retryable bool, err error) {
+	var reader io.Reader
+	if len(body) > 0 {
+		// bytes.Reader gives net/http a working GetBody, so redirects and
+		// internal retries can replay the body. Assigning req.Body by hand
+		// (the previous approach) silently dropped the body on redirect.
+		reader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, reader)
 	if err != nil {
-		return nil, err
+		return nil, false, fmt.Errorf("building request: %w", err)
 	}
 
-	// Set body if present
-	if body != nil && len(body) > 0 {
-		req.Body = io.NopCloser(strings.NewReader(string(body)))
-		req.ContentLength = int64(len(body))
-	}
-
-	// Set default User-Agent
 	req.Header.Set("User-Agent", c.config.UserAgent)
-
-	// Set custom headers
-	for key, value := range c.config.CustomHeaders {
-		req.Header.Set(key, value)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	for k, v := range c.config.CustomHeaders {
+		req.Header.Set(k, v)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
-	// Override with request-specific headers
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
+	start := time.Now()
+	c.requests.Add(1)
 
-	resp, err := c.httpClient.Do(req)
+	httpResp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		// Network-level failures are worth retrying once or twice.
+		return nil, true, fmt.Errorf("%s %s: %w", method, targetURL, err)
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	// Bound the body: a hostile or misconfigured target must not be able to
+	// exhaust our memory with an endless response.
+	limited := io.LimitReader(httpResp.Body, c.config.MaxBodySize+1)
+	respBody, readErr := io.ReadAll(limited)
+	if readErr != nil {
+		return nil, true, fmt.Errorf("reading body of %s: %w", targetURL, readErr)
 	}
 
-	return &Response{
-		StatusCode: resp.StatusCode,
-		Headers:    resp.Header,
+	truncated := false
+	if int64(len(respBody)) > c.config.MaxBodySize {
+		respBody = respBody[:c.config.MaxBodySize]
+		truncated = true
+		// Drain so the connection can be reused.
+		_, _ = io.Copy(io.Discard, httpResp.Body)
+	}
+	c.bytesRead.Add(int64(len(respBody)))
+
+	out := &Response{
+		StatusCode: httpResp.StatusCode,
+		Headers:    httpResp.Header,
 		Body:       respBody,
-	}, nil
+		FinalURL:   httpResp.Request.URL.String(),
+		Truncated:  truncated,
+		Elapsed:    time.Since(start),
+	}
+
+	switch {
+	case httpResp.StatusCode == http.StatusTooManyRequests:
+		c.rateLimited.Add(1)
+		return nil, true, &StatusError{StatusCode: httpResp.StatusCode, RetryAfter: parseRetryAfter(httpResp.Header)}
+	case httpResp.StatusCode >= 500:
+		return nil, true, &StatusError{StatusCode: httpResp.StatusCode, RetryAfter: parseRetryAfter(httpResp.Header)}
+	}
+
+	return out, false, nil
 }
 
-func (r *Response) GetHeader(key string) string {
-	return r.Headers.Get(key)
+// backoff computes the delay before attempt n, honouring Retry-After when the
+// server told us how long to wait.
+func (c *Client) backoff(attempt int, lastErr error) time.Duration {
+	var se *StatusError
+	if errors.As(lastErr, &se) && se.RetryAfter > 0 {
+		return se.RetryAfter
+	}
+	d := c.config.RetryBaseDelay << (attempt - 1)
+	if max := 10 * time.Second; d > max {
+		d = max
+	}
+	return d
 }
 
-func (r *Response) String() string {
-	return string(r.Body)
+// StatusError is returned for retryable HTTP status codes.
+type StatusError struct {
+	StatusCode int
+	RetryAfter time.Duration
 }
+
+func (e *StatusError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("http status %d (retry after %s)", e.StatusCode, e.RetryAfter)
+	}
+	return fmt.Sprintf("http status %d", e.StatusCode)
+}
+
+func parseRetryAfter(h http.Header) time.Duration {
+	v := h.Get("Retry-After")
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs >= 0 {
+		if secs > 60 {
+			secs = 60 // never let a target park us indefinitely
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			if d > time.Minute {
+				d = time.Minute
+			}
+			return d
+		}
+	}
+	return 0
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// Stats returns a snapshot of the client's counters.
+func (c *Client) Stats() Stats {
+	return Stats{
+		Requests:    c.requests.Load(),
+		Errors:      c.errors.Load(),
+		Retries:     c.retries.Load(),
+		RateLimited: c.rateLimited.Load(),
+		BytesRead:   c.bytesRead.Load(),
+	}
+}
+
+// BreakerState exposes the circuit breaker state for reporting.
+func (c *Client) BreakerState() BreakerState { return c.breaker.State() }
+
+// BreakerTripped reports how many times the breaker opened during the scan.
+func (c *Client) BreakerTripped() int { return c.breaker.Tripped() }
+
+// CloseIdleConnections releases pooled sockets.
+func (c *Client) CloseIdleConnections() { c.httpClient.CloseIdleConnections() }
+
+// GetHeader returns a response header value.
+func (r *Response) GetHeader(key string) string { return r.Headers.Get(key) }
+
+// String returns the response body as a string.
+func (r *Response) String() string { return string(r.Body) }
