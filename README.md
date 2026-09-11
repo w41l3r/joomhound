@@ -1,4 +1,4 @@
-# JoomHound 🦁
+# JoomHound
 
 **Joomla reconnaissance and authorized credential-testing CLI**
 
