@@ -90,6 +90,17 @@ type Stats struct {
 	BytesRead   int64
 }
 
+// sharedStats is shared by the scan client and every isolated cookie session.
+// Without shared counters, credential traffic disappeared from final reports
+// because each password attempt is intentionally executed in a fresh Client.
+type sharedStats struct {
+	requests    atomic.Int64
+	errors      atomic.Int64
+	retries     atomic.Int64
+	rateLimited atomic.Int64
+	bytesRead   atomic.Int64
+}
+
 // Client is a rate-limited, retrying, circuit-broken HTTP client shared by all
 // scan phases. It is safe for concurrent use.
 type Client struct {
@@ -97,12 +108,7 @@ type Client struct {
 	limiter    *rate.Limiter
 	breaker    *CircuitBreaker
 	config     ClientConfig
-
-	requests    atomic.Int64
-	errors      atomic.Int64
-	retries     atomic.Int64
-	rateLimited atomic.Int64
-	bytesRead   atomic.Int64
+	stats      *sharedStats
 }
 
 // NewClient builds a Client from config, applying defaults and validating the
@@ -214,6 +220,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 		limiter:    limiter,
 		breaker:    NewCircuitBreaker(config.Breaker),
 		config:     config,
+		stats:      &sharedStats{},
 	}, nil
 }
 
@@ -246,6 +253,7 @@ func (c *Client) NewSession() (*Client, error) {
 		limiter:    c.limiter, // shared on purpose
 		breaker:    c.breaker, // shared on purpose
 		config:     sessionConfig,
+		stats:      c.stats, // aggregate login traffic in scan metadata
 	}, nil
 }
 
@@ -289,7 +297,7 @@ func (c *Client) Do(ctx context.Context, method, targetURL string, body []byte, 
 
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			c.retries.Add(1)
+			c.stats.retries.Add(1)
 			if err := sleepCtx(ctx, c.backoff(attempt, lastErr)); err != nil {
 				return nil, err
 			}
@@ -315,7 +323,7 @@ func (c *Client) Do(ctx context.Context, method, targetURL string, body []byte, 
 		}
 
 		lastErr = err
-		c.errors.Add(1)
+		c.stats.errors.Add(1)
 		c.breaker.Failure()
 
 		// A cancelled context is never retryable.
@@ -356,7 +364,7 @@ func (c *Client) attempt(ctx context.Context, method, targetURL string, body []b
 	}
 
 	start := time.Now()
-	c.requests.Add(1)
+	c.stats.requests.Add(1)
 
 	httpResp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -382,7 +390,7 @@ func (c *Client) attempt(ctx context.Context, method, targetURL string, body []b
 		// Drain so the connection can be reused.
 		_, _ = io.Copy(io.Discard, httpResp.Body)
 	}
-	c.bytesRead.Add(int64(len(respBody)))
+	c.stats.bytesRead.Add(int64(len(respBody)))
 
 	out := &Response{
 		StatusCode: httpResp.StatusCode,
@@ -395,7 +403,7 @@ func (c *Client) attempt(ctx context.Context, method, targetURL string, body []b
 
 	switch {
 	case httpResp.StatusCode == http.StatusTooManyRequests:
-		c.rateLimited.Add(1)
+		c.stats.rateLimited.Add(1)
 		return nil, true, &StatusError{StatusCode: httpResp.StatusCode, RetryAfter: parseRetryAfter(httpResp.Header)}
 	case httpResp.StatusCode >= 500:
 		return nil, true, &StatusError{StatusCode: httpResp.StatusCode, RetryAfter: parseRetryAfter(httpResp.Header)}
@@ -480,11 +488,11 @@ func isRetryableMethod(method string) bool {
 // Stats returns a snapshot of the client's counters.
 func (c *Client) Stats() Stats {
 	return Stats{
-		Requests:    c.requests.Load(),
-		Errors:      c.errors.Load(),
-		Retries:     c.retries.Load(),
-		RateLimited: c.rateLimited.Load(),
-		BytesRead:   c.bytesRead.Load(),
+		Requests:    c.stats.requests.Load(),
+		Errors:      c.stats.errors.Load(),
+		Retries:     c.stats.retries.Load(),
+		RateLimited: c.stats.rateLimited.Load(),
+		BytesRead:   c.stats.bytesRead.Load(),
 	}
 }
 

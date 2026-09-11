@@ -14,7 +14,7 @@ repeatable scans rather than exploit a target.
 - 🔍 **Multi-signal fingerprinting** - Manifests, generator tags, Joomla assets, JavaScript namespaces, cookies, and administrator endpoints
 - 📦 **Component and template discovery** - Concurrent checks against a maintained built-in catalog
 - 👤 **Low-impact user enumeration** - Exact matches from Joomla's public API; no registration submissions
-- 🔐 **Session-aware password testing** - Cookies, CSRF tokens, and automatic lockout detection
+- 🔐 **Session-aware password testing** - Cookies, CSRF tokens, automatic lockout detection, and explicit attempt totals
 - 🚨 **CVE correlation** - Curated offline entries plus optional NVD and GitHub Advisory data
 - ⚡ **Bounded networking** - Connection pooling, response-size limits, rate limiting, and circuit breaking
 - 🛡️ **Safer HTTP behavior** - Same-host redirects and retries limited to GET/HEAD requests
@@ -252,6 +252,11 @@ fail before any scan requests are sent.
 
 An explicit `--format` or `--json` wins. Otherwise, a recognized output-file
 extension selects the format before an environment/config default.
+
+Credential reports identify whether a username was operator-supplied or
+discovered, how many password candidates were processed, how many checks were
+inconclusive because of request errors, whether a password matched, and the
+total HTTP traffic including isolated login sessions.
 
 ---
 

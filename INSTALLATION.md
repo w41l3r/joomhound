@@ -174,7 +174,10 @@ forms are never submitted as a username oracle.
 
 Password testing uses a new cookie session and CSRF token for each attempt.
 Login POST requests are never retried. HTTP 429, lockout signatures, and WAF
-indicators abort the run.
+indicators abort the run. Verbose output reports progress without printing
+candidate passwords. Reports include per-user and aggregate candidate counts,
+identify checks made inconclusive by request errors, and include isolated
+login-session traffic in the HTTP totals.
 
 ## CVE Lookup
 

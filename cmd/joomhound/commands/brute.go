@@ -23,6 +23,10 @@ never submits registration forms as a username-existence probe. Use
 
 Password testing sends a real Joomla login (session cookie + CSRF token) and
 aborts automatically when account lockout, rate limiting or a WAF is detected.
+Verbose output reports progress and final candidate counts without printing
+candidate passwords. Request failures are reported as inconclusive checks,
+not as rejected passwords. Reports distinguish an operator-supplied username
+from one discovered through the public API.
 
 If --users or --passwords is omitted, a small built-in list is used. This
 command makes real login attempts; review the selected users, wordlist,

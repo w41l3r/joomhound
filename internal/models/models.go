@@ -56,10 +56,14 @@ type User struct {
 	Found    bool   `json:"found"`
 	// Method records which enumeration technique confirmed this user, so a
 	// report can state the evidence rather than just asserting existence.
-	Method string `json:"method,omitempty"`
-	// For brute-force
+	Method        string `json:"method,omitempty"`
 	PasswordValid bool   `json:"password_valid"`
 	Password      string `json:"password,omitempty"`
+	// PasswordAttempts counts password candidates processed for this user.
+	PasswordAttempts int `json:"password_attempts,omitempty"`
+	// PasswordErrors counts processed candidates whose result was inconclusive
+	// because a request failed.
+	PasswordErrors int `json:"password_errors,omitempty"`
 }
 
 type Vulnerability struct {
@@ -104,12 +108,19 @@ type ScanMetadata struct {
 	EndTime   string `json:"end_time"`
 	Duration  string `json:"duration"`
 	// HTTPRequests is now actually populated from the HTTP client's counters.
-	HTTPRequests    int      `json:"http_requests"`
-	HTTPErrors      int      `json:"http_errors"`
-	HTTPRetries     int      `json:"http_retries"`
-	RateLimitedHits int      `json:"rate_limited_hits"`
-	BreakerTripped  int      `json:"circuit_breaker_tripped"`
-	CVESource       string   `json:"cve_source,omitempty"`
-	Errors          []string `json:"errors,omitempty"`
-	Warnings        []string `json:"warnings,omitempty"`
+	HTTPRequests    int `json:"http_requests"`
+	HTTPErrors      int `json:"http_errors"`
+	HTTPRetries     int `json:"http_retries"`
+	RateLimitedHits int `json:"rate_limited_hits"`
+	BreakerTripped  int `json:"circuit_breaker_tripped"`
+	// CredentialAttempts counts password candidates processed across all users.
+	CredentialAttempts int `json:"credential_attempts"`
+	// CredentialErrors counts candidate checks that were inconclusive because a
+	// request failed.
+	CredentialErrors int `json:"credential_errors"`
+	// CredentialsFound counts users for whom a submitted password was valid.
+	CredentialsFound int      `json:"credentials_found"`
+	CVESource        string   `json:"cve_source,omitempty"`
+	Errors           []string `json:"errors,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
 }

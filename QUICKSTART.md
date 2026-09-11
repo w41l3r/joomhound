@@ -123,6 +123,10 @@ as an existence probe.
 ```
 
 HTTP 429, lockout messages, and WAF indicators abort credential testing.
+With `--verbose`, progress and final attempt totals are printed without
+revealing candidate passwords. Reports distinguish operator-supplied users
+from API-discovered users, distinguish rejected candidates from inconclusive
+request failures, and include login-session requests in HTTP totals.
 
 ## Full Scan
 

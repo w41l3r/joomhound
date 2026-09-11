@@ -106,22 +106,36 @@ func (f *Formatter) toMarkdown(result *models.ScanResult) (string, error) {
 		sb.WriteString("No components detected.\n\n")
 	}
 
-	// Users Found
-	sb.WriteString("### Users Enumerated\n\n")
+	// Users and credential testing
+	sb.WriteString("### Users and Credential Testing\n\n")
 	if len(result.Users) > 0 {
-		sb.WriteString("| Username | Email | Status |\n")
-		sb.WriteString("|----------|-------|--------|\n")
+		sb.WriteString("| Username | Email | Source | Credential Result |\n")
+		sb.WriteString("|----------|-------|--------|-------------------|\n")
 		for _, user := range result.Users {
-			status := "❌"
-			if user.Found {
-				status = "✅"
+			source := user.Method
+			if source == "" {
+				source = "unknown"
 			}
-			sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n",
-				user.Username, user.Email, status))
+			conclusive, inconclusive := credentialCheckCounts(user)
+			credentialResult := "not tested"
+			switch {
+			case user.PasswordValid && inconclusive > 0:
+				credentialResult = fmt.Sprintf("valid after %d attempts (%d inconclusive)",
+					user.PasswordAttempts, inconclusive)
+			case user.PasswordValid:
+				credentialResult = fmt.Sprintf("valid after %d attempts", user.PasswordAttempts)
+			case user.PasswordAttempts > 0 && inconclusive > 0:
+				credentialResult = fmt.Sprintf("no valid password confirmed (%d conclusive, %d inconclusive)",
+					conclusive, inconclusive)
+			case user.PasswordAttempts > 0:
+				credentialResult = fmt.Sprintf("no match after %d attempts", user.PasswordAttempts)
+			}
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+				user.Username, user.Email, source, credentialResult))
 		}
 		sb.WriteString("\n")
 	} else {
-		sb.WriteString("No users enumerated.\n\n")
+		sb.WriteString("No users recorded.\n\n")
 	}
 
 	// Vulnerabilities
@@ -142,6 +156,16 @@ func (f *Formatter) toMarkdown(result *models.ScanResult) (string, error) {
 	sb.WriteString("## Metadata\n\n")
 	sb.WriteString(fmt.Sprintf("- **Duration:** %s\n", result.Metadata.Duration))
 	sb.WriteString(fmt.Sprintf("- **HTTP Requests:** %d\n", result.Metadata.HTTPRequests))
+	sb.WriteString(fmt.Sprintf("- **Credential Attempts:** %d\n", result.Metadata.CredentialAttempts))
+	sb.WriteString(fmt.Sprintf("- **Inconclusive Credential Checks:** %d\n", result.Metadata.CredentialErrors))
+	sb.WriteString(fmt.Sprintf("- **Valid Credentials:** %d\n", result.Metadata.CredentialsFound))
+
+	if len(result.Metadata.Warnings) > 0 {
+		sb.WriteString("\n### Warnings\n\n")
+		for _, warning := range result.Metadata.Warnings {
+			sb.WriteString(fmt.Sprintf("- %s\n", warning))
+		}
+	}
 
 	if len(result.Metadata.Errors) > 0 {
 		sb.WriteString("\n### Errors\n\n")
@@ -194,22 +218,42 @@ func (f *Formatter) toText(result *models.ScanResult) (string, error) {
 		sb.WriteString("    [-] No components detected\n")
 	}
 
-	// Users
-	sb.WriteString("\n[*] Users Enumerated\n")
+	// Users and credential testing
+	sb.WriteString("\n[*] Users and Credential Testing\n")
 	if len(result.Users) > 0 {
 		for _, user := range result.Users {
+			source := user.Method
+			if source == "" {
+				source = "unknown source"
+			}
+			marker := "[-]"
 			if user.Found {
-				sb.WriteString(fmt.Sprintf("    [+] %s\n", user.Username))
-				if user.Email != "" {
-					sb.WriteString(fmt.Sprintf("        Email: %s\n", user.Email))
+				marker = "[+]"
+			}
+			sb.WriteString(fmt.Sprintf("    %s User: %s (%s)\n", marker, user.Username, source))
+			if user.Email != "" {
+				sb.WriteString(fmt.Sprintf("        Email: %s\n", user.Email))
+			}
+			conclusive, inconclusive := credentialCheckCounts(user)
+			switch {
+			case user.PasswordValid:
+				sb.WriteString(fmt.Sprintf("        [+] Valid credentials found after %d attempts\n", user.PasswordAttempts))
+				if inconclusive > 0 {
+					sb.WriteString(fmt.Sprintf("        [!] Inconclusive password checks: %d\n", inconclusive))
 				}
-				if user.PasswordValid {
-					sb.WriteString(fmt.Sprintf("        Password: %s\n", user.Password))
-				}
+				sb.WriteString(fmt.Sprintf("        Password: %s\n", user.Password))
+			case user.PasswordAttempts > 0 && inconclusive > 0:
+				sb.WriteString(fmt.Sprintf(
+					"        [!] No valid password confirmed after %d attempts (%d conclusive, %d inconclusive)\n",
+					user.PasswordAttempts, conclusive, inconclusive))
+			case user.PasswordAttempts > 0:
+				sb.WriteString(fmt.Sprintf("        [-] No valid password found after %d attempts\n", user.PasswordAttempts))
+			default:
+				sb.WriteString("        [.] Passwords not tested\n")
 			}
 		}
 	} else {
-		sb.WriteString("    [-] No users enumerated\n")
+		sb.WriteString("    [-] No users recorded\n")
 	}
 
 	// Vulnerabilities. The text formatter previously omitted this section
@@ -240,6 +284,9 @@ func (f *Formatter) toText(result *models.ScanResult) (string, error) {
 	sb.WriteString(fmt.Sprintf("    [+] Duration: %s\n", result.Metadata.Duration))
 	sb.WriteString(fmt.Sprintf("    [+] HTTP Requests: %d (errors: %d, retries: %d)\n",
 		result.Metadata.HTTPRequests, result.Metadata.HTTPErrors, result.Metadata.HTTPRetries))
+	sb.WriteString(fmt.Sprintf("    [+] Credential Attempts: %d (inconclusive: %d, valid credentials: %d)\n",
+		result.Metadata.CredentialAttempts, result.Metadata.CredentialErrors,
+		result.Metadata.CredentialsFound))
 	if result.Metadata.CVESource != "" {
 		sb.WriteString(fmt.Sprintf("    [+] CVE Source: %s\n", result.Metadata.CVESource))
 	}
@@ -281,17 +328,20 @@ func (f *Formatter) toXML(result *models.ScanResult) (string, error) {
 			Methods:    xmlMethods{Items: append([]string(nil), result.Version.Methods...)},
 		},
 		Metadata: xmlMetadata{
-			StartTime:       result.Metadata.StartTime,
-			EndTime:         result.Metadata.EndTime,
-			Duration:        result.Metadata.Duration,
-			HTTPRequests:    result.Metadata.HTTPRequests,
-			HTTPErrors:      result.Metadata.HTTPErrors,
-			HTTPRetries:     result.Metadata.HTTPRetries,
-			RateLimitedHits: result.Metadata.RateLimitedHits,
-			BreakerTripped:  result.Metadata.BreakerTripped,
-			CVESource:       result.Metadata.CVESource,
-			Errors:          xmlMessages{Items: append([]string(nil), result.Metadata.Errors...)},
-			Warnings:        xmlMessages{Items: append([]string(nil), result.Metadata.Warnings...)},
+			StartTime:          result.Metadata.StartTime,
+			EndTime:            result.Metadata.EndTime,
+			Duration:           result.Metadata.Duration,
+			HTTPRequests:       result.Metadata.HTTPRequests,
+			HTTPErrors:         result.Metadata.HTTPErrors,
+			HTTPRetries:        result.Metadata.HTTPRetries,
+			RateLimitedHits:    result.Metadata.RateLimitedHits,
+			BreakerTripped:     result.Metadata.BreakerTripped,
+			CredentialAttempts: result.Metadata.CredentialAttempts,
+			CredentialErrors:   result.Metadata.CredentialErrors,
+			CredentialsFound:   result.Metadata.CredentialsFound,
+			CVESource:          result.Metadata.CVESource,
+			Errors:             xmlMessages{Items: append([]string(nil), result.Metadata.Errors...)},
+			Warnings:           xmlMessages{Items: append([]string(nil), result.Metadata.Warnings...)},
 		},
 	}
 
@@ -316,6 +366,8 @@ func (f *Formatter) toXML(result *models.ScanResult) (string, error) {
 		doc.Users.Items = append(doc.Users.Items, xmlUser{
 			Username: user.Username, ID: user.ID, Email: user.Email, Found: user.Found,
 			Method: user.Method, PasswordValid: user.PasswordValid, Password: user.Password,
+			PasswordAttempts: user.PasswordAttempts,
+			PasswordErrors:   user.PasswordErrors,
 		})
 	}
 	for _, vulnerability := range result.Vulnerabilities {
@@ -413,13 +465,15 @@ type xmlUsers struct {
 }
 
 type xmlUser struct {
-	Username      string `xml:"username"`
-	ID            int    `xml:"id,omitempty"`
-	Email         string `xml:"email,omitempty"`
-	Found         bool   `xml:"found"`
-	Method        string `xml:"method,omitempty"`
-	PasswordValid bool   `xml:"password_valid"`
-	Password      string `xml:"password,omitempty"`
+	Username         string `xml:"username"`
+	ID               int    `xml:"id,omitempty"`
+	Email            string `xml:"email,omitempty"`
+	Found            bool   `xml:"found"`
+	Method           string `xml:"method,omitempty"`
+	PasswordValid    bool   `xml:"password_valid"`
+	Password         string `xml:"password,omitempty"`
+	PasswordAttempts int    `xml:"password_attempts"`
+	PasswordErrors   int    `xml:"password_errors"`
 }
 
 type xmlVulnerabilities struct {
@@ -441,17 +495,38 @@ type xmlVulnerability struct {
 }
 
 type xmlMetadata struct {
-	StartTime       string      `xml:"start_time"`
-	EndTime         string      `xml:"end_time"`
-	Duration        string      `xml:"duration"`
-	HTTPRequests    int         `xml:"http_requests"`
-	HTTPErrors      int         `xml:"http_errors"`
-	HTTPRetries     int         `xml:"http_retries"`
-	RateLimitedHits int         `xml:"rate_limited_hits"`
-	BreakerTripped  int         `xml:"circuit_breaker_tripped"`
-	CVESource       string      `xml:"cve_source,omitempty"`
-	Errors          xmlMessages `xml:"errors"`
-	Warnings        xmlMessages `xml:"warnings"`
+	StartTime          string      `xml:"start_time"`
+	EndTime            string      `xml:"end_time"`
+	Duration           string      `xml:"duration"`
+	HTTPRequests       int         `xml:"http_requests"`
+	HTTPErrors         int         `xml:"http_errors"`
+	HTTPRetries        int         `xml:"http_retries"`
+	RateLimitedHits    int         `xml:"rate_limited_hits"`
+	BreakerTripped     int         `xml:"circuit_breaker_tripped"`
+	CredentialAttempts int         `xml:"credential_attempts"`
+	CredentialErrors   int         `xml:"credential_errors"`
+	CredentialsFound   int         `xml:"credentials_found"`
+	CVESource          string      `xml:"cve_source,omitempty"`
+	Errors             xmlMessages `xml:"errors"`
+	Warnings           xmlMessages `xml:"warnings"`
+}
+
+// credentialCheckCounts defensively normalizes counters before presenting
+// them. A malformed imported result must never display a negative number of
+// conclusive checks.
+func credentialCheckCounts(user models.User) (conclusive, inconclusive int) {
+	inconclusive = user.PasswordErrors
+	if inconclusive < 0 {
+		inconclusive = 0
+	}
+	if inconclusive > user.PasswordAttempts {
+		inconclusive = user.PasswordAttempts
+	}
+	conclusive = user.PasswordAttempts - inconclusive
+	if conclusive < 0 {
+		conclusive = 0
+	}
+	return conclusive, inconclusive
 }
 
 // GetFormatList returns list of supported formats

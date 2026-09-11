@@ -25,6 +25,9 @@ reports version `1.0.0`, and the project is distributed under the MIT License.
 - Read-only, exact-match user enumeration through Joomla's public API
 - Administrator login testing with cookie isolation and CSRF token handling
 - Immediate credential-test abort on HTTP 429 and lockout/WAF indicators
+- Per-user and aggregate credential-attempt totals, with inconclusive request
+  errors separated from rejected passwords and login-session traffic included
+  in HTTP statistics
 - Complete JSON and XML reports, plus text and Markdown summaries
 - Machine-readable stdout separated from operational stderr
 - YAML/environment configuration for passive defaults with CLI precedence
@@ -59,8 +62,6 @@ shipping features.
   proof that a vulnerable code path is exploitable.
 - Live CVE completeness and latency depend on external providers and their rate
   limits.
-- HTTP statistics currently describe the primary scan client; isolated login
-  session counters are not aggregated into the final metadata.
 
 ## Release Readiness Work
 
@@ -68,9 +69,8 @@ Before a public release, the recommended remaining work is:
 
 1. Add CI for `go test`, `go test -race`, `go vet`, and multi-platform builds.
 2. Add reproducible fixtures for Joomla 3, 4, and 5 behavior.
-3. Aggregate login-session HTTP statistics into scan metadata.
-4. Review the bundled CVE records on a scheduled cadence.
-5. Produce checksummed release artifacts and a documented disclosure process.
+3. Review the bundled CVE records on a scheduled cadence.
+4. Produce checksummed release artifacts and a documented disclosure process.
 
 ## Validation Commands
 

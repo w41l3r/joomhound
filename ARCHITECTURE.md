@@ -84,8 +84,8 @@ The scan-scoped client provides:
 POST requests are never automatically retried. A redirect policy refusal is
 also non-retryable.
 
-HTTP counters are collected atomically. The primary scan client's counters are
-included in `ScanMetadata`.
+HTTP counters are collected atomically and shared by the primary client and
+all isolated login sessions, so `ScanMetadata` represents the complete scan.
 
 ## Joomla Detection and Enumeration
 
@@ -169,6 +169,9 @@ Each password attempt:
 Login sessions have no retry budget. HTTP 429, known lockout text, CAPTCHA/WAF
 signals, and excessive consecutive failures stop the attack. Password jobs are
 fed through a bounded worker pool and cancellation stops producers/workers.
+Reports record per-user and aggregate candidate counts and identify request
+failures as inconclusive checks. Verbose progress never prints candidate
+passwords.
 
 The numeric contact/profile enumeration helper exists as an internal bounded
 API but is not exposed by a CLI flag or used by the default workflow.

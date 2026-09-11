@@ -65,12 +65,14 @@ type PasswordBruteforcer struct {
 	DelayBetween time.Duration
 	// Lockout configures lockout detection.
 	Lockout LockoutPolicy
-	// OnAttempt, when set, is called after every attempt for progress output.
+	// OnAttempt, when set, is called after every processed candidate, including
+	// inconclusive checks, for progress output.
 	OnAttempt func(username, password string, ok bool)
 	// OnMessage reports notable events (lockout, token loss).
 	OnMessage func(string)
 
-	attempts atomic.Int64
+	callbackMu sync.Mutex
+	attempts   atomic.Int64
 	// consecutiveErrors is shared across workers for lockout detection.
 	consecutiveErrors atomic.Int64
 	lockoutTripped    atomic.Bool
@@ -92,12 +94,23 @@ func NewPasswordBruteforcer(client *http.Client, threads int) *PasswordBruteforc
 }
 
 func (pb *PasswordBruteforcer) logf(format string, args ...any) {
-	if pb.OnMessage != nil {
-		pb.OnMessage(fmt.Sprintf(format, args...))
+	pb.callbackMu.Lock()
+	defer pb.callbackMu.Unlock()
+	if callback := pb.OnMessage; callback != nil {
+		callback(fmt.Sprintf(format, args...))
 	}
 }
 
-// Attempts returns how many login attempts were made.
+func (pb *PasswordBruteforcer) reportAttempt(username, password string, ok bool) {
+	pb.callbackMu.Lock()
+	defer pb.callbackMu.Unlock()
+	if callback := pb.OnAttempt; callback != nil {
+		callback(username, password, ok)
+	}
+}
+
+// Attempts returns the cumulative number of password candidates processed by
+// this bruteforcer. The count includes inconclusive request failures.
 func (pb *PasswordBruteforcer) Attempts() int64 { return pb.attempts.Load() }
 
 // BruteForcePassword tries each password for username, stopping at the first
@@ -128,13 +141,15 @@ func (pb *PasswordBruteforcer) BruteForcePassword(
 	defer cancel()
 
 	var (
-		mu        sync.Mutex
-		wg        sync.WaitGroup
-		once      sync.Once
-		lockErr   error
-		jobs      = make(chan string)
-		workerN   = pb.threads
-		succeeded bool
+		mu           sync.Mutex
+		wg           sync.WaitGroup
+		once         sync.Once
+		processed    atomic.Int64
+		inconclusive atomic.Int64
+		lockErr      error
+		jobs         = make(chan string)
+		workerN      = pb.threads
+		succeeded    bool
 	)
 
 	if workerN > len(passwords) {
@@ -157,11 +172,21 @@ func (pb *PasswordBruteforcer) BruteForcePassword(
 				}
 
 				ok, err := pb.tryPassword(ctx, targetURL, username, pass)
-				pb.attempts.Add(1)
-
-				if pb.OnAttempt != nil {
-					pb.OnAttempt(username, pass, ok)
+				// Jobs cancelled because another worker found a valid password (or
+				// because the operator interrupted the scan) were never evaluated.
+				if err != nil && ctx.Err() != nil {
+					return
 				}
+				pb.attempts.Add(1)
+				processed.Add(1)
+				if err != nil {
+					inconclusive.Add(1)
+					if !errors.Is(err, ErrAccountLockout) {
+						pb.logf("[!] password check for %s was inconclusive: %v", username, err)
+					}
+				}
+
+				pb.reportAttempt(username, pass, ok)
 
 				switch {
 				case errors.Is(err, ErrAccountLockout):
@@ -217,6 +242,8 @@ producer:
 
 	mu.Lock()
 	defer mu.Unlock()
+	result.PasswordAttempts = int(processed.Load())
+	result.PasswordErrors = int(inconclusive.Load())
 
 	if lockErr != nil && !succeeded {
 		return result, lockErr
@@ -272,6 +299,9 @@ func (pb *PasswordBruteforcer) tryPassword(ctx context.Context, targetURL, usern
 	}
 	if sess.token != "" {
 		form.Set(sess.token, "1")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 
 	resp, err := sess.client.PostForm(ctx, sess.loginURL, form)

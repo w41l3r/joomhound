@@ -251,6 +251,42 @@ func TestNewSessionIsolatesCookies(t *testing.T) {
 	}
 }
 
+func TestNewSessionSharesRequestStatistics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	client := newTestClient(t, ClientConfig{EnableCookies: true})
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if _, err := client.Get(context.Background(), srv.URL); err != nil {
+		t.Fatalf("client Get: %v", err)
+	}
+	if _, err := session.Get(context.Background(), srv.URL); err != nil {
+		t.Fatalf("session Get: %v", err)
+	}
+	if _, err := session.Post(context.Background(), srv.URL, []byte("login"), "text/plain"); err != nil {
+		t.Fatalf("session Post: %v", err)
+	}
+
+	for name, stats := range map[string]Stats{
+		"parent":  client.Stats(),
+		"session": session.Stats(),
+	} {
+		if stats.Requests != 3 {
+			t.Errorf("%s Requests = %d, want shared total 3", name, stats.Requests)
+		}
+		if stats.BytesRead != 6 {
+			t.Errorf("%s BytesRead = %d, want shared total 6", name, stats.BytesRead)
+		}
+	}
+}
+
 func TestNewSessionDisablesRetries(t *testing.T) {
 	c := newTestClient(t, ClientConfig{MaxRetries: 4})
 	sess, err := c.NewSession()

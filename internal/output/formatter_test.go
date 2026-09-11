@@ -43,7 +43,7 @@ func TestXMLReportContainsCompleteResult(t *testing.T) {
 			{Name: "plg_system_example", Path: "/plugins/system/example/", Author: "Example & Co", Installed: true},
 		},
 		Users: []models.User{
-			{Username: "admin", ID: 42, Email: "admin@example.test", Found: true, Method: "operator-supplied", PasswordValid: true, Password: `p&<secret>`},
+			{Username: "admin", ID: 42, Email: "admin@example.test", Found: true, Method: "operator-supplied", PasswordValid: true, Password: `p&<secret>`, PasswordAttempts: 3, PasswordErrors: 1},
 		},
 		Vulnerabilities: []models.Vulnerability{
 			{CVE: "CVE-2024-0001", Title: "Example <issue>", Description: "Details & impact", CVSS: 8.1,
@@ -53,6 +53,7 @@ func TestXMLReportContainsCompleteResult(t *testing.T) {
 		Metadata: models.ScanMetadata{
 			StartTime: "2026-09-10T10:00:00Z", EndTime: "2026-09-10T10:00:01Z", Duration: "1s",
 			HTTPRequests: 12, HTTPErrors: 1, HTTPRetries: 2, RateLimitedHits: 3, BreakerTripped: 4,
+			CredentialAttempts: 3, CredentialErrors: 1, CredentialsFound: 1,
 			CVESource: "offline", Errors: []string{"one error"}, Warnings: []string{"one warning"},
 		},
 	}
@@ -80,8 +81,12 @@ func TestXMLReportContainsCompleteResult(t *testing.T) {
 		"<joomla_detected>true</joomla_detected>",
 		"<detection_signals>", "<version>", "<components>", "<templates>",
 		"<plugins>", "<users>", "<password_valid>true</password_valid>",
+		"<password_attempts>3</password_attempts>", "<password_errors>1</password_errors>",
 		"<vulnerabilities>", "<references>", "<metadata>",
-		"<rate_limited_hits>3</rate_limited_hits>", "<errors>", "<warnings>",
+		"<rate_limited_hits>3</rate_limited_hits>",
+		"<credential_attempts>3</credential_attempts>", "<credential_errors>1</credential_errors>",
+		"<credentials_found>1</credentials_found>",
+		"<errors>", "<warnings>",
 		"a=1&amp;b=&lt;value&gt;", "p&amp;&lt;secret&gt;", "Example &amp; Co",
 	} {
 		if !strings.Contains(report, want) {
@@ -141,14 +146,15 @@ func TestHumanReportsIncludeCoreFindings(t *testing.T) {
 			{Name: "com_content", Type: "component", Path: "/components/com_content/", Detected: true},
 		},
 		Users: []models.User{
-			{Username: "admin", Email: "admin@example.test", Found: true, PasswordValid: true, Password: "secret"},
+			{Username: "admin", Email: "admin@example.test", Found: true, Method: "operator-supplied", PasswordValid: true, Password: "secret", PasswordAttempts: 3},
+			{Username: "editor", Found: true, Method: "public-api", PasswordAttempts: 19, PasswordErrors: 1},
 		},
 		Vulnerabilities: []models.Vulnerability{
 			{CVE: "CVE-2024-0001", Title: "Example issue", CVSS: 8.1, Severity: "HIGH", Confidence: "high", Affected: []string{"Joomla 4.4.3"}, Reference: "https://example.test/advisory"},
 		},
 		Metadata: models.ScanMetadata{
 			StartTime: "2026-09-11T00:00:00Z", Duration: "1s", HTTPRequests: 12,
-			HTTPErrors: 1, HTTPRetries: 2, CVESource: "offline",
+			HTTPErrors: 1, HTTPRetries: 2, CredentialAttempts: 22, CredentialErrors: 1, CredentialsFound: 1, CVESource: "offline",
 			Errors: []string{"one error"}, Warnings: []string{"one warning"},
 		},
 	}
@@ -161,14 +167,21 @@ func TestHumanReportsIncludeCoreFindings(t *testing.T) {
 			format: "text",
 			want: []string{
 				"Joomla Detected", "Version: 4.4.3", "com_content", "admin@example.test",
-				"Password: secret", "CVE-2024-0001", "one warning", "one error",
+				"User: admin (operator-supplied)", "Valid credentials found after 3 attempts",
+				"Password: secret", "User: editor (public-api)",
+				"No valid password confirmed after 19 attempts (18 conclusive, 1 inconclusive)",
+				"Credential Attempts: 22 (inconclusive: 1, valid credentials: 1)",
+				"CVE-2024-0001", "one warning", "one error",
 			},
 		},
 		{
 			format: "markdown",
 			want: []string{
 				"# JoomHound Scan Report", "**Version:** 4.4.3", "com_content",
-				"admin@example.test", "CVE-2024-0001", "one error",
+				"admin@example.test", "operator-supplied", "valid after 3 attempts",
+				"no valid password confirmed (18 conclusive, 1 inconclusive)",
+				"**Credential Attempts:** 22", "**Inconclusive Credential Checks:** 1",
+				"CVE-2024-0001", "one warning", "one error",
 			},
 		},
 	}

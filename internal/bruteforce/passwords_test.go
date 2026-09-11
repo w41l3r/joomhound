@@ -6,6 +6,7 @@ import (
 	"fmt"
 	nethttp "net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -167,6 +168,10 @@ func TestBruteForceFindsValidPassword(t *testing.T) {
 	if res.Password != "correct-horse" {
 		t.Fatalf("Password = %q, want %q", res.Password, "correct-horse")
 	}
+	if res.PasswordAttempts == 0 || int64(res.PasswordAttempts) != pb.Attempts() {
+		t.Fatalf("PasswordAttempts = %d, cumulative Attempts = %d; want matching non-zero counts",
+			res.PasswordAttempts, pb.Attempts())
+	}
 }
 
 func TestBruteForceReportsNoFalsePositive(t *testing.T) {
@@ -183,6 +188,50 @@ func TestBruteForceReportsNoFalsePositive(t *testing.T) {
 	}
 	if res.PasswordValid {
 		t.Fatalf("reported a false positive: %q", res.Password)
+	}
+	if res.PasswordAttempts != 3 {
+		t.Fatalf("PasswordAttempts = %d, want 3", res.PasswordAttempts)
+	}
+	if res.PasswordErrors != 0 {
+		t.Fatalf("PasswordErrors = %d, want 0", res.PasswordErrors)
+	}
+}
+
+func TestBruteForceCountsRequestErrorsAsInconclusive(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.Method == nethttp.MethodGet {
+			w.Write([]byte(loginPage))
+			return
+		}
+		if posts.Add(1) == 1 {
+			w.WriteHeader(nethttp.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(loginPage))
+	}))
+	defer srv.Close()
+
+	pb := NewPasswordBruteforcer(testClient(t), 1)
+	var messages []string
+	pb.OnMessage = func(message string) { messages = append(messages, message) }
+	res, err := pb.BruteForcePassword(context.Background(), srv.URL, "admin",
+		[]string{"first", "second"})
+	if err != nil {
+		t.Fatalf("BruteForcePassword: %v", err)
+	}
+	if res.PasswordValid {
+		t.Fatal("request failure must not be reported as a valid password")
+	}
+	if res.PasswordAttempts != 2 || res.PasswordErrors != 1 {
+		t.Fatalf("password counters = attempts %d, errors %d; want 2, 1",
+			res.PasswordAttempts, res.PasswordErrors)
+	}
+	if len(messages) != 1 || !strings.Contains(messages[0], "password check for admin was inconclusive: http status 500") {
+		t.Fatalf("unexpected diagnostic messages: %v", messages)
+	}
+	if strings.Contains(messages[0], "first") {
+		t.Fatalf("diagnostic message leaked the password candidate: %q", messages[0])
 	}
 }
 
@@ -234,7 +283,7 @@ func TestBruteForceAbortsImmediatelyOnHTTP429(t *testing.T) {
 	pb := NewPasswordBruteforcer(client, 1)
 
 	start := time.Now()
-	_, err = pb.BruteForcePassword(context.Background(), srv.URL, "admin",
+	res, err := pb.BruteForcePassword(context.Background(), srv.URL, "admin",
 		[]string{"one", "two", "three", "four"})
 	if !errors.Is(err, ErrAccountLockout) {
 		t.Fatalf("error = %v, want ErrAccountLockout", err)
@@ -247,6 +296,12 @@ func TestBruteForceAbortsImmediatelyOnHTTP429(t *testing.T) {
 	}
 	if got := pb.Attempts(); got != 1 {
 		t.Fatalf("Attempts = %d, want 1", got)
+	}
+	if res.PasswordAttempts != 1 {
+		t.Fatalf("PasswordAttempts = %d, want 1", res.PasswordAttempts)
+	}
+	if res.PasswordErrors != 1 {
+		t.Fatalf("PasswordErrors = %d, want 1", res.PasswordErrors)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/w41l3r/joomhound/internal/bruteforce"
@@ -432,9 +433,20 @@ func (s *Scanner) runBruteForce(ctx context.Context) {
 		}
 
 		user := s.result.Users[i]
-		s.verbosef("[*] Brute-forcing passwords for user: %s", user.Username)
+		totalPasswords := len(s.config.PasswordWordlist)
+		var completed atomic.Int64
+		bf.OnAttempt = func(_, _ string, _ bool) {
+			n := completed.Add(1)
+			if n == 1 || n%10 == 0 || n == int64(totalPasswords) {
+				s.verbosef("[*] Password progress for %s: %d/%d attempts completed",
+					user.Username, n, totalPasswords)
+			}
+		}
+
+		s.verbosef("[*] Testing %d passwords for user: %s", totalPasswords, user.Username)
 
 		res, err := bf.BruteForcePassword(ctx, s.result.Target, user.Username, s.config.PasswordWordlist)
+		bf.OnAttempt = nil
 		if res != nil {
 			// Preserve enumeration metadata that the brute-forcer does not know.
 			res.ID = user.ID
@@ -443,11 +455,17 @@ func (s *Scanner) runBruteForce(ctx context.Context) {
 
 			s.mu.Lock()
 			s.result.Users[i] = *res
-			s.mu.Unlock()
-
+			s.result.Metadata.CredentialAttempts += res.PasswordAttempts
+			s.result.Metadata.CredentialErrors += res.PasswordErrors
 			if res.PasswordValid {
-				s.verbosef("[+] Valid credentials found for user: %s", res.Username)
+				s.result.Metadata.CredentialsFound++
 			}
+			s.mu.Unlock()
+		}
+		if res != nil && res.PasswordErrors > 0 {
+			s.addWarning(fmt.Sprintf(
+				"credential testing for %s was incomplete: %d of %d password checks were inconclusive due to request errors",
+				res.Username, res.PasswordErrors, res.PasswordAttempts))
 		}
 
 		if errors.Is(err, bruteforce.ErrAccountLockout) {
@@ -458,6 +476,31 @@ func (s *Scanner) runBruteForce(ctx context.Context) {
 		}
 		if err != nil && ctx.Err() == nil {
 			s.addError(fmt.Sprintf("brute-force for %s: %v", user.Username, err))
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if res != nil && res.PasswordValid {
+			if res.PasswordErrors > 0 {
+				s.verbosef("[+] Valid credentials found for user: %s after %d attempts (%d inconclusive)",
+					res.Username, res.PasswordAttempts, res.PasswordErrors)
+			} else {
+				s.verbosef("[+] Valid credentials found for user: %s after %d attempts",
+					res.Username, res.PasswordAttempts)
+			}
+		} else if res != nil && res.PasswordAttempts > 0 {
+			conclusive := res.PasswordAttempts - res.PasswordErrors
+			if conclusive < 0 {
+				conclusive = 0
+			}
+			if res.PasswordErrors > 0 {
+				s.verbosef("[!] No valid password confirmed for user: %s after %d attempts (%d conclusive, %d inconclusive)",
+					res.Username, res.PasswordAttempts, conclusive, res.PasswordErrors)
+			} else {
+				s.verbosef("[-] No valid password found for user: %s after %d attempts",
+					res.Username, res.PasswordAttempts)
+			}
 		}
 	}
 }
