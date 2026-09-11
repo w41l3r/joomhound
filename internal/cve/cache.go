@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -156,7 +158,9 @@ func (c *DiskCache) Put(key string, advisories []Advisory) error {
 	return nil
 }
 
-// Purge deletes every cache entry.
+// Purge deletes only files that match this cache's SHA-256 filename format.
+// The cache directory may be user-configured, so unrelated files must never
+// be removed.
 func (c *DiskCache) Purge() error {
 	c.mu.Lock()
 	c.mem = make(map[string]cacheEnvelope)
@@ -166,13 +170,28 @@ func (c *DiskCache) Purge() error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || !isDiskCacheFilename(e.Name()) {
 			continue
 		}
-		_ = os.Remove(filepath.Join(c.dir, e.Name()))
+		if err := os.Remove(filepath.Join(c.dir, e.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("removing cache entry %s: %w", e.Name(), err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func isDiskCacheFilename(name string) bool {
+	if !strings.HasSuffix(name, ".json") {
+		return false
+	}
+	digest := strings.TrimSuffix(name, ".json")
+	if len(digest) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
 }
 
 // MemoryCache is an in-process Cache, useful in tests and for one-shot runs

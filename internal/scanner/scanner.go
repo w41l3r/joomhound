@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -61,6 +63,9 @@ type ScanConfig struct {
 	// Output options
 	OutputFormat string
 	Verbose      bool
+	// LogWriter receives verbose operational messages. It is separate from
+	// report output so machine-readable stdout remains parseable.
+	LogWriter io.Writer
 }
 
 // Scanner orchestrates a scan.
@@ -70,6 +75,7 @@ type Scanner struct {
 	detector  *enum.Detector
 	cveDB     *cve.Database
 	fetcher   cve.CVEFetcher
+	logger    *log.Logger
 	startTime time.Time
 
 	mu     sync.Mutex
@@ -109,11 +115,17 @@ func NewScanner(config ScanConfig) (*Scanner, error) {
 	detector := enum.NewDetector(httpClient)
 	detector.SetThreads(config.Threads)
 
+	logWriter := config.LogWriter
+	if logWriter == nil {
+		logWriter = os.Stderr
+	}
+
 	s := &Scanner{
 		config:    config,
 		client:    httpClient,
 		detector:  detector,
 		cveDB:     cve.NewDatabase(),
+		logger:    log.New(logWriter, "", 0),
 		startTime: time.Now(),
 		result: &models.ScanResult{
 			Target:          enum.NormalizeTarget(config.Target),
@@ -134,8 +146,8 @@ func NewScanner(config ScanConfig) (*Scanner, error) {
 	return s, nil
 }
 
-// buildCVEFetcher assembles the CVE lookup pipeline: online providers with a
-// disk cache and an offline fallback, or offline-only when --cve-online is not
+// buildCVEFetcher assembles the CVE lookup pipeline: online providers merged
+// with the curated offline database, or offline-only when --cve-online is not
 // set.
 func (s *Scanner) buildCVEFetcher() cve.CVEFetcher {
 	offline := cve.NewOfflineFetcher(s.cveDB)
@@ -151,7 +163,7 @@ func (s *Scanner) buildCVEFetcher() cve.CVEFetcher {
 	}
 
 	opts := []cve.MultiFetcherOption{
-		cve.WithFallback(offline),
+		cve.WithOfflineSource(offline),
 		cve.WithTimeout(45 * time.Second),
 		cve.WithErrorHandler(func(provider string, err error) {
 			s.addWarning(fmt.Sprintf("CVE provider %s failed: %v", provider, err))
@@ -167,7 +179,7 @@ func (s *Scanner) buildCVEFetcher() cve.CVEFetcher {
 		opts = append(opts, cve.WithCache(cve.NewMemoryCache(s.config.CveCacheTTL)))
 	}
 
-	s.result.Metadata.CVESource = "online (nvd, github) with offline fallback"
+	s.result.Metadata.CVESource = "online (nvd, github) + offline"
 	return cve.NewMultiFetcher(providers, opts...)
 }
 
@@ -182,7 +194,7 @@ func firstNonEmpty(vals ...string) string {
 
 func (s *Scanner) verbosef(format string, args ...any) {
 	if s.config.Verbose {
-		fmt.Printf(format+"\n", args...)
+		s.logger.Printf(format, args...)
 	}
 }
 
@@ -434,7 +446,7 @@ func (s *Scanner) runBruteForce(ctx context.Context) {
 			s.mu.Unlock()
 
 			if res.PasswordValid {
-				s.verbosef("[+] Valid credentials found: %s:%s", res.Username, res.Password)
+				s.verbosef("[+] Valid credentials found for user: %s", res.Username)
 			}
 		}
 

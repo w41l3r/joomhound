@@ -23,7 +23,11 @@ type Query struct {
 
 // CacheKey is a stable identity for the query, used by the disk cache.
 func (q Query) CacheKey() string {
+	// Bump the schema prefix whenever provider/query semantics change. This
+	// prevents older, broader results from surviving a correctness fix for a
+	// full cache TTL.
 	return strings.ToLower(strings.Join([]string{
+		"v2",
 		strings.TrimSpace(q.Product),
 		strings.TrimSpace(q.Version),
 		strings.TrimSpace(q.Component),
@@ -126,12 +130,11 @@ type Cache interface {
 	Put(key string, advisories []Advisory) error
 }
 
-// MultiFetcher queries several providers, caches the merged result, and
-// degrades gracefully: if every online provider fails it falls back to the
-// offline provider so a scan never hard-fails because NVD was down.
+// MultiFetcher queries several providers, merges the curated offline source,
+// caches complete results, and degrades gracefully when online sources fail.
 type MultiFetcher struct {
 	providers []CVEFetcher
-	fallback  CVEFetcher
+	offline   CVEFetcher
 	cache     Cache
 
 	// Timeout bounds the whole multi-provider lookup.
@@ -150,9 +153,17 @@ func WithCache(c Cache) MultiFetcherOption {
 	return func(m *MultiFetcher) { m.cache = c }
 }
 
-// WithFallback sets the provider used when all online providers fail.
+// WithOfflineSource adds a local source that is always merged with successful
+// online results and remains available if every online provider fails.
+func WithOfflineSource(f CVEFetcher) MultiFetcherOption {
+	return func(m *MultiFetcher) { m.offline = f }
+}
+
+// WithFallback is retained for source compatibility. New code should use
+// WithOfflineSource, whose name reflects that the source is always merged.
+// Deprecated: use WithOfflineSource.
 func WithFallback(f CVEFetcher) MultiFetcherOption {
-	return func(m *MultiFetcher) { m.fallback = f }
+	return WithOfflineSource(f)
 }
 
 // WithTimeout bounds the aggregate lookup.
@@ -230,9 +241,10 @@ func (m *MultiFetcher) Fetch(ctx context.Context, q Query) ([]Advisory, error) {
 	close(results)
 
 	var (
-		merged []Advisory
-		errs   []error
-		okAny  bool
+		merged    []Advisory
+		errs      []error
+		onlineOK  bool
+		offlineOK bool
 	)
 
 	for r := range results {
@@ -243,20 +255,26 @@ func (m *MultiFetcher) Fetch(ctx context.Context, q Query) ([]Advisory, error) {
 			}
 			continue
 		}
-		okAny = true
+		onlineOK = true
 		merged = append(merged, r.advs...)
 	}
 
-	if !okAny {
-		// Every online provider failed: fall back to the offline database so
-		// --cve-online degrades to --cve behaviour instead of returning nothing.
-		if m.fallback != nil {
-			advs, err := m.fallback.Fetch(context.WithoutCancel(ctx), q)
-			if err == nil {
-				return DedupeAdvisories(advs), nil
+	// Curated entries complement live feeds: online providers do not expose a
+	// reliable Joomla-component field and may lag project disclosures.
+	if m.offline != nil {
+		advs, err := m.offline.Fetch(context.WithoutCancel(ctx), q)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.offline.Name(), err))
+			if m.OnProviderError != nil {
+				m.OnProviderError(m.offline.Name(), err)
 			}
-			errs = append(errs, fmt.Errorf("%s: %w", m.fallback.Name(), err))
+		} else {
+			offlineOK = true
+			merged = append(merged, advs...)
 		}
+	}
+
+	if !onlineOK && !offlineOK {
 		if len(errs) == 0 {
 			return nil, nil
 		}
@@ -265,8 +283,9 @@ func (m *MultiFetcher) Fetch(ctx context.Context, q Query) ([]Advisory, error) {
 
 	merged = DedupeAdvisories(merged)
 
-	if m.cache != nil {
-		// A cache write failure is not fatal.
+	if m.cache != nil && len(errs) == 0 {
+		// Cache only complete results. A partial-provider response should not
+		// hide recovery of a failed source for the full cache TTL.
 		_ = m.cache.Put(key, merged)
 	}
 
@@ -361,7 +380,7 @@ func dedupeStrings(in []string) []string {
 }
 
 // OfflineFetcher adapts the built-in Database to the CVEFetcher interface so
-// it can serve as the fallback provider inside a MultiFetcher.
+// it can serve as the curated local provider inside a MultiFetcher.
 type OfflineFetcher struct {
 	DB *Database
 }

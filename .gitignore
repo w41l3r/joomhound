@@ -38,6 +38,10 @@ results/
 *.md
 !README.md
 !RESEARCH.md
+!QUICKSTART.md
+!INSTALLATION.md
+!ARCHITECTURE.md
+!PROJECT_STATUS.md
 
 # Wordlists (if downloaded)
 wordlists/

@@ -260,7 +260,7 @@ func (pb *PasswordBruteforcer) BruteForceMultipleUsers(
 func (pb *PasswordBruteforcer) tryPassword(ctx context.Context, targetURL, username, password string) (bool, error) {
 	sess, err := newAdminSession(ctx, pb.client, targetURL)
 	if err != nil {
-		return false, err
+		return false, classifyAttemptError(err)
 	}
 
 	form := url.Values{
@@ -276,7 +276,7 @@ func (pb *PasswordBruteforcer) tryPassword(ctx context.Context, targetURL, usern
 
 	resp, err := sess.client.PostForm(ctx, sess.loginURL, form)
 	if err != nil {
-		return false, err
+		return false, classifyAttemptError(err)
 	}
 
 	body := resp.String()
@@ -292,7 +292,7 @@ func (pb *PasswordBruteforcer) tryPassword(ctx context.Context, targetURL, usern
 	// with an authenticated GET to confirm rather than trusting a keyword.
 	verify, err := sess.client.Get(ctx, sess.loginURL)
 	if err != nil {
-		return false, err
+		return false, classifyAttemptError(err)
 	}
 	vbody := verify.String()
 
@@ -304,6 +304,21 @@ func (pb *PasswordBruteforcer) tryPassword(ctx context.Context, targetURL, usern
 	}
 
 	return isAuthenticated(vbody), nil
+}
+
+// classifyAttemptError turns server throttling into an immediate lockout
+// signal. Waiting for the generic consecutive-error threshold after an HTTP
+// 429 would send additional credential attempts after the target explicitly
+// asked us to stop.
+func classifyAttemptError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var statusErr *http.StatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == 429 {
+		return fmt.Errorf("%w: %w", ErrAccountLockout, err)
+	}
+	return err
 }
 
 // isAuthenticated decides whether a rendered administrator page belongs to a

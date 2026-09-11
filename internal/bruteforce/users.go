@@ -37,22 +37,10 @@ func (ue *UserEnumerator) logf(format string, args ...any) {
 	}
 }
 
-// registrationOracle captures how the target responds to a username that is
-// guaranteed NOT to exist. Every positive result must differ from this
-// baseline, otherwise it is not evidence of anything.
-//
-// This replaces the previous logic, which reported a user as existing
-// whenever the response contained "Invalid username or password" - a message
-// Joomla returns for *every* failed login by design. That made the enumerator
-// return every candidate as a valid user.
-type registrationOracle struct {
-	usable   bool
-	status   int
-	bodyHash string
-}
-
-// EnumerateUsers probes each candidate username using whichever methods the
-// target actually supports.
+// EnumerateUsers checks candidate usernames through Joomla's public web
+// services API when the target exposes it. It deliberately avoids registration
+// submissions: those mutate server-side state on some Joomla versions and do
+// not provide a reliable cross-version existence oracle.
 func (ue *UserEnumerator) EnumerateUsers(ctx context.Context, targetURL string, usernames []string) ([]models.User, error) {
 	base := NormalizeTarget(targetURL)
 
@@ -60,21 +48,17 @@ func (ue *UserEnumerator) EnumerateUsers(ctx context.Context, targetURL string, 
 		return nil, nil
 	}
 
-	// Probe which techniques are viable before spending the wordlist.
+	// Probe the API before spending the wordlist.
 	apiUsable := ue.probeAPI(ctx, base)
-	oracle := ue.buildRegistrationOracle(ctx, base)
-
-	if !apiUsable && !oracle.usable {
-		ue.logf("[-] no reliable user-enumeration vector available on this target " +
-			"(public API disabled and registration validation not discriminating); skipping")
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !apiUsable {
+		ue.logf("[-] no reliable user-enumeration vector available " +
+			"(the public Joomla API is unavailable); skipping")
 		return nil, nil
 	}
-	if apiUsable {
-		ue.logf("[+] user enumeration via public Joomla API is available")
-	}
-	if oracle.usable {
-		ue.logf("[+] user enumeration via registration validation is available")
-	}
+	ue.logf("[+] user enumeration via public Joomla API is available")
 
 	var (
 		mu  sync.Mutex
@@ -98,23 +82,7 @@ func (ue *UserEnumerator) EnumerateUsers(ctx context.Context, targetURL string, 
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			var (
-				found  bool
-				userID int
-				method string
-			)
-
-			if apiUsable {
-				if id, ok := ue.viaAPI(ctx, base, username); ok {
-					found, userID, method = true, id, "public-api"
-				}
-			}
-			if !found && oracle.usable {
-				if ok := ue.viaRegistration(ctx, base, username, oracle); ok {
-					found, method = true, "registration-validation"
-				}
-			}
-
+			userID, found := ue.viaAPI(ctx, base, username)
 			if !found {
 				return
 			}
@@ -123,7 +91,7 @@ func (ue *UserEnumerator) EnumerateUsers(ctx context.Context, targetURL string, 
 				Username: username,
 				ID:       userID,
 				Found:    true,
-				Method:   method,
+				Method:   "public-api",
 			}
 
 			mu.Lock()
@@ -187,96 +155,6 @@ func (ue *UserEnumerator) viaAPI(ctx context.Context, base, username string) (in
 		}
 	}
 	return 0, false
-}
-
-// buildRegistrationOracle establishes the "username is free" baseline using
-// random usernames that cannot exist.
-func (ue *UserEnumerator) buildRegistrationOracle(ctx context.Context, base string) registrationOracle {
-	var o registrationOracle
-
-	first, ok := ue.registrationProbe(ctx, base, "jh"+randomToken(8))
-	if !ok {
-		return o
-	}
-	second, ok := ue.registrationProbe(ctx, base, "jh"+randomToken(8))
-	if !ok {
-		return o
-	}
-
-	// The endpoint is only a usable oracle if it is deterministic for
-	// non-existent users. If two random names produce different responses,
-	// the signal is noise and we must not use it.
-	if first.status != second.status || first.bodyHash != second.bodyHash {
-		return o
-	}
-
-	o.usable = true
-	o.status = first.status
-	o.bodyHash = first.bodyHash
-	return o
-}
-
-type probeResult struct {
-	status   int
-	bodyHash string
-}
-
-// registrationProbe submits a username to Joomla's registration validation
-// endpoint and normalizes the response for comparison.
-func (ue *UserEnumerator) registrationProbe(ctx context.Context, base, username string) (probeResult, bool) {
-	endpoint := base + "/index.php?option=com_users&task=registration.register&format=json"
-
-	form := url.Values{
-		"jform[username]":  {username},
-		"jform[name]":      {username},
-		"jform[email1]":    {username + "@example.invalid"},
-		"jform[email2]":    {username + "@example.invalid"},
-		"jform[password1]": {"Jh" + randomToken(8) + "!aA1"},
-		"jform[password2]": {"Jh" + randomToken(8) + "!aA1"},
-	}
-
-	resp, err := ue.client.PostForm(ctx, endpoint, form)
-	if err != nil {
-		return probeResult{}, false
-	}
-
-	return probeResult{
-		status:   resp.StatusCode,
-		bodyHash: normalizeBody(resp.String(), username),
-	}, true
-}
-
-// viaRegistration reports a username as existing when its response differs
-// from the known "free username" baseline.
-func (ue *UserEnumerator) viaRegistration(ctx context.Context, base, username string, o registrationOracle) bool {
-	res, ok := ue.registrationProbe(ctx, base, username)
-	if !ok {
-		return false
-	}
-	return res.status != o.status || res.bodyHash != o.bodyHash
-}
-
-// normalizeBody strips the echoed username and volatile tokens so that two
-// responses differing only by those values compare equal.
-func normalizeBody(body, username string) string {
-	b := strings.ToLower(body)
-	b = strings.ReplaceAll(b, strings.ToLower(username), "{{u}}")
-	// Drop 32-hex CSRF tokens and session ids, which change per request.
-	b = reCSRFTokenAlt.ReplaceAllString(b, "{{token}}")
-
-	// Collapse whitespace so formatting differences do not register.
-	b = strings.Join(strings.Fields(b), " ")
-
-	// Compare on length plus a coarse content signature rather than the full
-	// body, to stay cheap for large pages.
-	return fmt.Sprintf("%d:%s", len(b), truncateStr(b, 512))
-}
-
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // EnumerateViaProfilePages walks numeric user IDs looking for exposed profile

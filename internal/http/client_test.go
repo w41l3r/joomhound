@@ -118,6 +118,33 @@ func TestRetriesOnServerError(t *testing.T) {
 	}
 }
 
+func TestPostIsNeverRetried(t *testing.T) {
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, ClientConfig{MaxRetries: 3, RetryBaseDelay: time.Millisecond})
+
+	_, err := c.Post(context.Background(), srv.URL, []byte("has-side-effects"), "text/plain")
+	if err == nil {
+		t.Fatal("Post returned nil error for HTTP 500")
+	}
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("Post error = %v, want a 500 StatusError", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("server saw %d POST requests, want exactly 1", got)
+	}
+	if got := c.Stats().Retries; got != 0 {
+		t.Fatalf("Retries = %d, want 0 for POST", got)
+	}
+}
+
 func TestRetryAfterIsHonoured(t *testing.T) {
 	var calls atomic.Int32
 
@@ -221,6 +248,64 @@ func TestNewSessionIsolatesCookies(t *testing.T) {
 	}
 	if got := resp.String(); got != "issued" {
 		t.Fatalf("body = %q, want %q (session should start with no cookies)", got, "issued")
+	}
+}
+
+func TestNewSessionDisablesRetries(t *testing.T) {
+	c := newTestClient(t, ClientConfig{MaxRetries: 4})
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if got := sess.config.MaxRetries; got != 0 {
+		t.Fatalf("session MaxRetries = %d, want 0", got)
+	}
+}
+
+func TestSameHostRedirectIsAllowed(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, srv.URL+"/done", http.StatusFound)
+			return
+		}
+		w.Write([]byte("done"))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, ClientConfig{FollowRedirects: true})
+	resp, err := c.Get(context.Background(), srv.URL+"/start")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if resp.String() != "done" || !strings.HasSuffix(resp.FinalURL, "/done") {
+		t.Fatalf("unexpected redirect response: body=%q final_url=%q", resp.String(), resp.FinalURL)
+	}
+}
+
+func TestCrossHostRedirectIsRejectedWithoutRetry(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Redirect(w, r, "http://different.example/landing", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, ClientConfig{
+		FollowRedirects: true,
+		MaxRetries:      3,
+		RetryBaseDelay:  time.Millisecond,
+	})
+
+	_, err := c.Get(context.Background(), srv.URL)
+	if !errors.Is(err, ErrCrossHostRedirect) {
+		t.Fatalf("Get error = %v, want ErrCrossHostRedirect", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("origin saw %d requests, want 1", got)
+	}
+	if got := c.Stats().Retries; got != 0 {
+		t.Fatalf("Retries = %d, want 0 for a policy refusal", got)
 	}
 }
 

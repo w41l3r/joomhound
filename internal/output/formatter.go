@@ -2,6 +2,7 @@ package output
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"strings"
 
@@ -12,13 +13,28 @@ type Formatter struct {
 	format string // json, xml, markdown, text
 }
 
-func NewFormatter(format string) *Formatter {
+// NormalizeFormat validates and canonicalizes a report format.
+func NormalizeFormat(format string) (string, error) {
+	format = strings.ToLower(strings.TrimSpace(format))
 	if format == "" {
-		format = "text"
+		return "text", nil
 	}
-	return &Formatter{
-		format: strings.ToLower(format),
+	for _, supported := range GetFormatList() {
+		if format == supported {
+			return format, nil
+		}
 	}
+	return "", fmt.Errorf("unsupported output format %q; choose one of: %s",
+		format, strings.Join(GetFormatList(), ", "))
+}
+
+// NewFormatter returns a formatter only for a supported output format.
+func NewFormatter(format string) (*Formatter, error) {
+	normalized, err := NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+	return &Formatter{format: normalized}, nil
 }
 
 // Format formats the scan result based on the configured format
@@ -30,8 +46,10 @@ func (f *Formatter) Format(result *models.ScanResult) (string, error) {
 		return f.toXML(result)
 	case "markdown":
 		return f.toMarkdown(result)
-	default:
+	case "text":
 		return f.toText(result)
+	default:
+		return "", fmt.Errorf("unsupported output format %q", f.format)
 	}
 }
 
@@ -248,53 +266,192 @@ func (f *Formatter) toText(result *models.ScanResult) (string, error) {
 	return sb.String(), nil
 }
 
-// toXML converts result to XML format (basic implementation)
+// toXML serializes the complete scan result into a stable XML schema.
 func (f *Formatter) toXML(result *models.ScanResult) (string, error) {
-	var sb strings.Builder
-
-	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	sb.WriteString("<scan>\n")
-	sb.WriteString(fmt.Sprintf("  <target>%s</target>\n", escapeXML(result.Target)))
-	sb.WriteString(fmt.Sprintf("  <timestamp>%s</timestamp>\n", result.Metadata.StartTime))
-
-	sb.WriteString("  <detection>\n")
-	if result.JoomlaDetected {
-		sb.WriteString("    <joomla>true</joomla>\n")
-		if result.Version.Detected {
-			sb.WriteString(fmt.Sprintf("    <version>%s</version>\n", result.Version.Version))
-		}
-	} else {
-		sb.WriteString("    <joomla>false</joomla>\n")
-	}
-	sb.WriteString("  </detection>\n")
-
-	if len(result.Components) > 0 {
-		sb.WriteString("  <components>\n")
-		for _, comp := range result.Components {
-			if comp.Detected {
-				sb.WriteString("    <component>\n")
-				sb.WriteString(fmt.Sprintf("      <name>%s</name>\n", escapeXML(comp.Name)))
-				sb.WriteString(fmt.Sprintf("      <type>%s</type>\n", comp.Type))
-				sb.WriteString(fmt.Sprintf("      <path>%s</path>\n", comp.Path))
-				sb.WriteString("    </component>\n")
-			}
-		}
-		sb.WriteString("  </components>\n")
+	doc := xmlScanReport{
+		Target:         result.Target,
+		JoomlaDetected: result.JoomlaDetected,
+		DetectionSignals: xmlSignals{
+			Items: append([]string(nil), result.DetectionSignals...),
+		},
+		Version: xmlVersion{
+			Detected:   result.Version.Detected,
+			Value:      result.Version.Version,
+			Confidence: result.Version.Confidence,
+			Methods:    xmlMethods{Items: append([]string(nil), result.Version.Methods...)},
+		},
+		Metadata: xmlMetadata{
+			StartTime:       result.Metadata.StartTime,
+			EndTime:         result.Metadata.EndTime,
+			Duration:        result.Metadata.Duration,
+			HTTPRequests:    result.Metadata.HTTPRequests,
+			HTTPErrors:      result.Metadata.HTTPErrors,
+			HTTPRetries:     result.Metadata.HTTPRetries,
+			RateLimitedHits: result.Metadata.RateLimitedHits,
+			BreakerTripped:  result.Metadata.BreakerTripped,
+			CVESource:       result.Metadata.CVESource,
+			Errors:          xmlMessages{Items: append([]string(nil), result.Metadata.Errors...)},
+			Warnings:        xmlMessages{Items: append([]string(nil), result.Metadata.Warnings...)},
+		},
 	}
 
-	sb.WriteString("</scan>\n")
+	for _, component := range result.Components {
+		doc.Components.Items = append(doc.Components.Items, xmlComponent{
+			Name: component.Name, Type: component.Type, Path: component.Path,
+			Detected: component.Detected, Version: component.Version, Installed: component.Installed,
+		})
+	}
+	for _, template := range result.Templates {
+		doc.Templates.Items = append(doc.Templates.Items, xmlTemplate{
+			Name: template.Name, Path: template.Path, Version: template.Version,
+		})
+	}
+	for _, plugin := range result.Plugins {
+		doc.Plugins.Items = append(doc.Plugins.Items, xmlPlugin{
+			Name: plugin.Name, Path: plugin.Path, Version: plugin.Version,
+			Author: plugin.Author, Installed: plugin.Installed,
+		})
+	}
+	for _, user := range result.Users {
+		doc.Users.Items = append(doc.Users.Items, xmlUser{
+			Username: user.Username, ID: user.ID, Email: user.Email, Found: user.Found,
+			Method: user.Method, PasswordValid: user.PasswordValid, Password: user.Password,
+		})
+	}
+	for _, vulnerability := range result.Vulnerabilities {
+		doc.Vulnerabilities.Items = append(doc.Vulnerabilities.Items, xmlVulnerability{
+			CVE: vulnerability.CVE, Title: vulnerability.Title,
+			Description: vulnerability.Description, CVSS: vulnerability.CVSS,
+			Severity: vulnerability.Severity, Affected: xmlValues{Items: append([]string(nil), vulnerability.Affected...)},
+			PoC: vulnerability.PoC, Reference: vulnerability.Reference,
+			References: xmlValues{Items: append([]string(nil), vulnerability.References...)},
+			Source:     vulnerability.Source, Confidence: vulnerability.Confidence,
+		})
+	}
 
-	return sb.String(), nil
+	data, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encoding XML report: %w", err)
+	}
+	return xml.Header + string(data) + "\n", nil
 }
 
-// escapeXML escapes special XML characters
-func escapeXML(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
-	return s
+type xmlScanReport struct {
+	XMLName          xml.Name           `xml:"scan"`
+	Target           string             `xml:"target"`
+	JoomlaDetected   bool               `xml:"joomla_detected"`
+	DetectionSignals xmlSignals         `xml:"detection_signals"`
+	Version          xmlVersion         `xml:"version"`
+	Components       xmlComponents      `xml:"components"`
+	Templates        xmlTemplates       `xml:"templates"`
+	Plugins          xmlPlugins         `xml:"plugins"`
+	Users            xmlUsers           `xml:"users"`
+	Vulnerabilities  xmlVulnerabilities `xml:"vulnerabilities"`
+	Metadata         xmlMetadata        `xml:"metadata"`
+}
+
+type xmlSignals struct {
+	Items []string `xml:"signal"`
+}
+
+type xmlMethods struct {
+	Items []string `xml:"method"`
+}
+
+type xmlValues struct {
+	Items []string `xml:"item"`
+}
+
+type xmlMessages struct {
+	Items []string `xml:"message"`
+}
+
+type xmlVersion struct {
+	Detected   bool       `xml:"detected"`
+	Value      string     `xml:"value,omitempty"`
+	Methods    xmlMethods `xml:"methods"`
+	Confidence float64    `xml:"confidence"`
+}
+
+type xmlComponents struct {
+	Items []xmlComponent `xml:"component"`
+}
+
+type xmlComponent struct {
+	Name      string `xml:"name"`
+	Type      string `xml:"type"`
+	Path      string `xml:"path"`
+	Detected  bool   `xml:"detected"`
+	Version   string `xml:"version,omitempty"`
+	Installed bool   `xml:"installed"`
+}
+
+type xmlTemplates struct {
+	Items []xmlTemplate `xml:"template"`
+}
+
+type xmlTemplate struct {
+	Name    string `xml:"name"`
+	Path    string `xml:"path"`
+	Version string `xml:"version,omitempty"`
+}
+
+type xmlPlugins struct {
+	Items []xmlPlugin `xml:"plugin"`
+}
+
+type xmlPlugin struct {
+	Name      string `xml:"name"`
+	Path      string `xml:"path"`
+	Version   string `xml:"version,omitempty"`
+	Author    string `xml:"author,omitempty"`
+	Installed bool   `xml:"installed"`
+}
+
+type xmlUsers struct {
+	Items []xmlUser `xml:"user"`
+}
+
+type xmlUser struct {
+	Username      string `xml:"username"`
+	ID            int    `xml:"id,omitempty"`
+	Email         string `xml:"email,omitempty"`
+	Found         bool   `xml:"found"`
+	Method        string `xml:"method,omitempty"`
+	PasswordValid bool   `xml:"password_valid"`
+	Password      string `xml:"password,omitempty"`
+}
+
+type xmlVulnerabilities struct {
+	Items []xmlVulnerability `xml:"vulnerability"`
+}
+
+type xmlVulnerability struct {
+	CVE         string    `xml:"cve"`
+	Title       string    `xml:"title"`
+	Description string    `xml:"description,omitempty"`
+	CVSS        float64   `xml:"cvss"`
+	Severity    string    `xml:"severity,omitempty"`
+	Affected    xmlValues `xml:"affected"`
+	PoC         string    `xml:"poc,omitempty"`
+	Reference   string    `xml:"reference,omitempty"`
+	References  xmlValues `xml:"references"`
+	Source      string    `xml:"source,omitempty"`
+	Confidence  string    `xml:"confidence,omitempty"`
+}
+
+type xmlMetadata struct {
+	StartTime       string      `xml:"start_time"`
+	EndTime         string      `xml:"end_time"`
+	Duration        string      `xml:"duration"`
+	HTTPRequests    int         `xml:"http_requests"`
+	HTTPErrors      int         `xml:"http_errors"`
+	HTTPRetries     int         `xml:"http_retries"`
+	RateLimitedHits int         `xml:"rate_limited_hits"`
+	BreakerTripped  int         `xml:"circuit_breaker_tripped"`
+	CVESource       string      `xml:"cve_source,omitempty"`
+	Errors          xmlMessages `xml:"errors"`
+	Warnings        xmlMessages `xml:"warnings"`
 }
 
 // GetFormatList returns list of supported formats

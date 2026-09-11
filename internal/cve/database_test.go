@@ -210,6 +210,40 @@ func TestDiskCacheIgnoresCorruptEntry(t *testing.T) {
 	}
 }
 
+func TestDiskCachePurgePreservesUnrelatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewDiskCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewDiskCache: %v", err)
+	}
+
+	const key = "joomla|3.9.4|"
+	if err := cache.Put(key, []Advisory{{ID: "CVE-TEST"}}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	unrelated := []string{"notes.txt", "settings.json", "short-digest.json"}
+	for _, name := range unrelated {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("keep"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s): %v", name, err)
+		}
+	}
+
+	if err := cache.Purge(); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if _, ok := cache.Get(key); ok {
+		t.Fatal("purged cache entry is still available")
+	}
+	if _, err := os.Stat(cache.path(key)); !os.IsNotExist(err) {
+		t.Fatalf("cache file still exists or returned unexpected error: %v", err)
+	}
+	for _, name := range unrelated {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("unrelated file %s was not preserved: %v", name, err)
+		}
+	}
+}
+
 func TestOfflineFetcherFetch(t *testing.T) {
 	f := NewOfflineFetcher(nil)
 

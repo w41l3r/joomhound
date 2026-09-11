@@ -36,6 +36,13 @@ var allowedProxySchemes = map[string]bool{
 	"socks5": true,
 }
 
+// Redirect policy errors are exported so callers and tests can distinguish a
+// deliberate security refusal from an ordinary network failure.
+var (
+	ErrCrossHostRedirect = errors.New("cross-host redirect refused")
+	ErrRedirectLimit     = errors.New("redirect limit exceeded")
+)
+
 // ClientConfig configures a Client.
 type ClientConfig struct {
 	Timeout   time.Duration
@@ -60,8 +67,9 @@ type ClientConfig struct {
 	// MaxBodySize caps how much of a response body we buffer.
 	MaxBodySize int64
 
-	// MaxRetries is the number of retries after the first attempt for
-	// transient failures (network error, 429, 5xx).
+	// MaxRetries is the number of retries after the first attempt for safe,
+	// idempotent requests that hit transient failures (network error, 429,
+	// 5xx). Requests with side effects, including POST, are never retried.
 	MaxRetries     int
 	RetryBaseDelay time.Duration
 
@@ -175,10 +183,18 @@ func NewClient(config ClientConfig) (*Client, error) {
 		httpClient.Jar = jar
 	}
 
-	if !config.FollowRedirects {
-		httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !config.FollowRedirects {
 			return http.ErrUseLastResponse
 		}
+		if len(via) >= 10 {
+			return ErrRedirectLimit
+		}
+		if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+			return fmt.Errorf("%w: %s -> %s", ErrCrossHostRedirect,
+				via[0].URL.Hostname(), req.URL.Hostname())
+		}
+		return nil
 	}
 
 	var limiter *rate.Limiter
@@ -218,11 +234,18 @@ func (c *Client) NewSession() (*Client, error) {
 		Jar:           jar,
 	}
 
+	// Login requests have side effects and must never inherit a retry budget.
+	// Do also refuses to retry POST, but zeroing this budget protects the
+	// session's preparatory and verification requests from multiplying a
+	// credential attempt when the target starts throttling.
+	sessionConfig := c.config
+	sessionConfig.MaxRetries = 0
+
 	return &Client{
 		httpClient: inner,
 		limiter:    c.limiter, // shared on purpose
 		breaker:    c.breaker, // shared on purpose
-		config:     c.config,
+		config:     sessionConfig,
 	}, nil
 }
 
@@ -299,7 +322,7 @@ func (c *Client) Do(ctx context.Context, method, targetURL string, body []byte, 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if !retryable {
+		if !retryable || !isRetryableMethod(method) {
 			return nil, err
 		}
 	}
@@ -337,8 +360,10 @@ func (c *Client) attempt(ctx context.Context, method, targetURL string, body []b
 
 	httpResp, err := c.httpClient.Do(req)
 	if err != nil {
-		// Network-level failures are worth retrying once or twice.
-		return nil, true, fmt.Errorf("%s %s: %w", method, targetURL, err)
+		// Policy failures will not become valid on another attempt. Other
+		// network-level failures may be retried when the method is safe.
+		retryable := !errors.Is(err, ErrCrossHostRedirect) && !errors.Is(err, ErrRedirectLimit)
+		return nil, retryable, fmt.Errorf("%s %s: %w", method, targetURL, err)
 	}
 	defer httpResp.Body.Close()
 
@@ -393,7 +418,8 @@ func (c *Client) backoff(attempt int, lastErr error) time.Duration {
 	return d
 }
 
-// StatusError is returned for retryable HTTP status codes.
+// StatusError is returned for transient HTTP status codes. Do decides whether
+// retrying is safe for the request method.
 type StatusError struct {
 	StatusCode int
 	RetryAfter time.Duration
@@ -439,6 +465,15 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-t.C:
 		return nil
+	}
+}
+
+func isRetryableMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead:
+		return true
+	default:
+		return false
 	}
 }
 

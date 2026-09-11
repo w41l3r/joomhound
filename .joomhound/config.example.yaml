@@ -1,55 +1,39 @@
-# JoomHound Configuration File
-# Copy this file to ~/.joomhound/config.yaml and customize
+# JoomHound configuration file
+# Copy to ~/.joomhound/config.yaml or pass --config /path/to/config.yaml.
+# Precedence: CLI flags > JOOMHOUND_* environment variables > this file > defaults.
 
-# HTTP Configuration
-http:
-  timeout: 30
-  verify_ssl: false
-  rate_limit: 10  # requests per second
-  max_connections: 10
+# Global passive defaults
+timeout: 30
+threads: 10
+rate-limit: 10
+proxy: "" # http://host:port, https://host:port, or socks5://host:port
+user-agent: ""
+verify-ssl: false
+no-redirects: false
+verbose: false
+quiet: false
 
-# Proxy Configuration
-proxy:
-  enabled: false
-  url: "http://127.0.0.1:8080"
-  # For SOCKS5: socks5://127.0.0.1:1080
+# Report defaults
+format: text # text, json, xml, or markdown
 
-# Output Configuration
-output:
-  format: "markdown"  # json, markdown, xml, text
-  directory: "./results"
-  timestamp: true
+# Enumeration defaults (used by `enum`)
+version-detect: true
+components: true
+templates: true
+cve: true
 
-# Scan Configuration
-scan:
-  threads: 10
-  follow_redirects: true
-  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-  custom_headers:
-    X-Custom-Header: "value"
+# CVE provider defaults
+cve-online: false
+cve-cache-dir: "" # empty uses $HOME/.joomhound/cache/cve
+cve-cache-ttl: 24 # hours
 
-# Enumeration Configuration
-enum:
-  check_version: true
-  check_components: true
-  check_templates: true
-  check_plugins: true
-  check_cves: true
+# Prefer NVD_API_KEY and GITHUB_TOKEN environment variables for secrets.
+nvd-api-key: ""
+github-token: ""
 
-# Brute-force Configuration
-bruteforce:
-  threads: 5  # Lower for brute-force to avoid lockout
-  max_retries: 3
-  delay_between_attempts: 1000  # milliseconds
-  backoff_factor: 2.0
+# Additional delay between credential attempts, in milliseconds.
+brute-delay: 0
 
-# User Enumeration
-users:
-  method: "registration"  # registration, api, error_messages, profiles
-  threads: 10
-
-# Wordlists
-wordlists:
-  users: "/usr/share/wordlists/users.txt"
-  passwords: "/usr/share/wordlists/rockyou.txt"
-  components: "internal/data/components.txt"
+# Safety: target URLs, --brute, usernames, wordlists, output paths, component
+# queries, version queries, and --purge-cache are CLI-only. A config file can
+# never start credential testing or select a target by itself.

@@ -1,23 +1,24 @@
 # JoomHound 🦁
 
-**Advanced Joomla Enumeration & Penetration Testing Tool**
+**Joomla reconnaissance and authorized credential-testing CLI**
 
-JoomHound is a modern, high-performance Joomla reconnaissance and exploitation tool written in Go. It combines the best techniques from `droopescan`, `JoomlaScan`, and OWASP `joomscan` with real-time CVE correlation and intelligent brute-force capabilities.
+JoomHound fingerprints Joomla installations, detects versions, enumerates known
+components and templates, correlates CVEs, and can test explicitly authorized
+administrator credentials. It is written in Go and designed to produce bounded,
+repeatable scans rather than exploit a target.
 
 ---
 
 ## ✨ Features
 
-- 🔍 **6-Method Joomla Fingerprinting** - 98%+ accuracy via manifest detection, meta tags, JS namespaces, admin panel probing
-- 📦 **Component Enumeration** - Detects 37+ Joomla components with version detection
-- 🎨 **Template Discovery** - Identifies installed frontend and admin templates
-- 👤 **Smart User Enumeration** - Registration oracle baseline to eliminate false positives
-- 🔐 **Password Brute-Force** - Real sessions, CSRF token handling, automatic lockout detection
-- 🚨 **Real-Time CVE Correlation** - Offline database + NVD API + GitHub Advisory integration
-- ⚡ **Performance Optimized** - Goroutines, connection pooling, token bucket rate limiting
-- 🛡️ **Enterprise Features** - Circuit breaker pattern, exponential backoff, proxy support (HTTP/SOCKS5)
-- 📊 **Multiple Output Formats** - JSON, XML, Markdown, Text
-- 🔒 **Account Lockout Protection** - Auto-aborts on WAF/lockout signatures (429, rate limit, account suspension)
+- 🔍 **Multi-signal fingerprinting** - Manifests, generator tags, Joomla assets, JavaScript namespaces, cookies, and administrator endpoints
+- 📦 **Component and template discovery** - Concurrent checks against a maintained built-in catalog
+- 👤 **Low-impact user enumeration** - Exact matches from Joomla's public API; no registration submissions
+- 🔐 **Session-aware password testing** - Cookies, CSRF tokens, and automatic lockout detection
+- 🚨 **CVE correlation** - Curated offline entries plus optional NVD and GitHub Advisory data
+- ⚡ **Bounded networking** - Connection pooling, response-size limits, rate limiting, and circuit breaking
+- 🛡️ **Safer HTTP behavior** - Same-host redirects and retries limited to GET/HEAD requests
+- 📊 **Report formats** - Complete JSON and XML reports, plus Markdown and text
 
 ---
 
@@ -53,100 +54,17 @@ joomhound scan -t http://target.local --cve-online -j -o report.json
 
 ---
 
-## 📋 Real-World Example
+## 📋 Target URLs
 
-### Target: Joomla 3.10.0 (app.inlanefreight.local)
-
-#### Step 1: Enumerate Version & Components
-
-```bash
-$ joomhound enum -t http://app.inlanefreight.local -v -j
-```
-
-**Output:**
-```json
-{
-  "target": "http://app.inlanefreight.local",
-  "joomla_detected": true,
-  "detection_signals": [
-    "meta-generator",
-    "joomla-js-namespace",
-    "joomla-asset-paths",
-    "joomla-session-cookie",
-    "joomla-robots-txt",
-    "core-manifest"
-  ],
-  "version": {
-    "detected": true,
-    "version": "3.10.0",
-    "methods": ["core-manifest"],
-    "confidence": 0.98
-  },
-  "components": [
-    {"name": "com_content", "version": "3.0.0", "detected": true},
-    {"name": "com_users", "version": "3.0.0", "detected": true},
-    {"name": "com_contact", "version": "3.0.0", "detected": true},
-    "... (33 total components)"
-  ],
-  "templates": [
-    {"name": "protostar", "version": "1.0"},
-    {"name": "beez3", "version": "3.1.0"}
-  ],
-  "vulnerabilities": [
-    {
-      "cve": "CVE-2023-40626",
-      "title": "Environment Variable Disclosure",
-      "severity": "HIGH",
-      "cvss": 7.5,
-      "affected": ["Joomla 3.10.0"]
-    },
-    {
-      "cve": "CVE-2024-21726",
-      "title": "Inadequate Content Filtering Leads to XSS",
-      "severity": "MEDIUM",
-      "cvss": 6.5,
-      "affected": ["Joomla 3.10.0"]
-    }
-  ]
-}
-```
-
-#### Step 2: Brute-Force Admin Credentials
+Commands that contact a Joomla site require `-t/--target`. Supply the absolute
+base URL, including `http://` or `https://`. Non-default ports and subdirectory
+installations are supported:
 
 ```bash
-$ joomhound brute -t http://app.inlanefreight.local \
-  -u admin \
-  -p /usr/share/metasploit-framework/data/wordlists/http_default_pass.txt \
-  -v
+joomhound enum --target https://host.example:8443/joomla
 ```
 
-**Output:**
-```
-[+] Joomla detected (6 signals: [...])
-[+] Version 3.10.0 (confidence 98%, via core-manifest)
-[*] Attempting password brute-force...
-[+] Valid credentials found: admin:turnkey
-[*] Scan completed in 13.5s (3 requests, 0 errors, 0 retries)
-```
-
-#### Step 3: Full Scan Report
-
-```bash
-$ joomhound scan -t http://app.inlanefreight.local \
-  --brute \
-  --users admin \
-  --passwords wordlist.txt \
-  -f json \
-  -o report.json
-```
-
-**Results:**
-- ✅ Joomla Version: **3.10.0**
-- ✅ Components: **33** enumerated
-- ✅ Templates: **3** detected
-- ✅ CVEs: **2** found (1 HIGH, 1 MEDIUM)
-- ✅ Admin Credentials: **admin:turnkey**
-- ✅ Time: **14.5 seconds**
+The `cve` command is local/provider-based and does not accept a target URL.
 
 ---
 
@@ -212,10 +130,13 @@ joomhound scan -t http://target.local \
 
 ```bash
 # Offline CVE database
-joomhound cve joomla 3.10.0
+joomhound cve --version 3.10.0
 
-# With online feeds
-joomhound cve joomla 3.10.0 --online
+# Merge online feeds with the offline database
+joomhound cve --version 3.10.0 --online
+
+# Look up advisories for a component
+joomhound cve --component com_fields
 ```
 
 ---
@@ -240,14 +161,15 @@ joomhound/
 │   │   └── detector.go         # 6-method Joomla detection
 │   │
 │   ├── bruteforce/
-│   │   ├── users.go            # Registration oracle user enumeration
+│   │   ├── users.go            # Public-API user enumeration
 │   │   ├── passwords.go        # Session-aware password attacks
 │   │   └── joomla.go           # Joomla-specific utilities
 │   │
 │   ├── cve/
 │   │   ├── database.go         # Offline CVE database
-│   │   ├── fetcher.go          # CVE fetcher interface
-│   │   ├── providers/          # NVD API, GitHub Advisory
+│   │   ├── fetcher.go          # CVE source aggregation
+│   │   ├── nvd.go              # NVD API provider
+│   │   ├── github.go           # GitHub Advisory provider
 │   │   └── cache.go            # Disk/memory cache
 │   │
 │   ├── http/
@@ -275,35 +197,82 @@ joomhound/
 ```
 --config string           Config file (default: ~/.joomhound/config.yaml)
 --timeout int             HTTP timeout in seconds (default: 20)
---rate-limit float        Max requests/sec (default: 10)
+--rate-limit float        Max requests/sec (default: 10; non-positive resets to 10)
 -T, --threads int         Concurrent workers (default: 10)
 --proxy string            HTTP/SOCKS5 proxy URL
 --user-agent string       Custom User-Agent
---no-redirects            Don't follow redirects
---verify-ssl              Verify TLS certificates
+--no-redirects            Do not follow HTTP redirects
+--verify-ssl              Verify TLS certificates for HTTPS targets
 -v, --verbose             Verbose output
 -q, --quiet               Suppress banner
 ```
 
 ---
 
+## ⚙️ Configuration
+
+Copy [`.joomhound/config.example.yaml`](.joomhound/config.example.yaml) to
+`$HOME/.joomhound/config.yaml`, or select a file with `--config`:
+
+```yaml
+timeout: 30
+threads: 10
+rate-limit: 5
+verify-ssl: true
+format: json
+cve-online: false
+```
+
+Precedence is `CLI flags > JOOMHOUND_* environment variables > config file >
+built-in defaults`. Hyphens become underscores in environment names; for
+example, `rate-limit` maps to `JOOMHOUND_RATE_LIMIT`.
+
+For safety, target URLs, credential-testing switches, usernames, wordlists,
+output paths, CVE query terms, and cache purge remain CLI-only. A configuration
+file cannot silently choose a target or enable brute-force.
+
+An explicitly selected missing, malformed, or incorrectly typed config file is
+reported as an error instead of being ignored.
+
+---
+
+## 📤 Output Streams
+
+Without `-o/--output`, the selected report is written to stdout. Banner,
+verbose progress, warnings, and file confirmations are written to stderr, so
+structured output can be piped directly:
+
+```bash
+joomhound enum -t https://target.example --format json | jq '.version'
+joomhound scan -t https://target.example --format xml > report.xml
+```
+
+Unknown formats and contradictory combinations such as `--json --format xml`
+fail before any scan requests are sent.
+
+An explicit `--format` or `--json` wins. Otherwise, a recognized output-file
+extension selects the format before an environment/config default.
+
+---
+
 ## 🚨 Safety Features
 
-✅ **Account Lockout Detection** - Monitors HTTP 429, lockout messages, WAF signatures  
-✅ **Rate Limiting** - Token bucket algorithm with configurable requests/sec  
-✅ **Circuit Breaker** - Auto-stops on repeated failures  
-✅ **Exponential Backoff** - Smart retry with increasing delays  
-✅ **Session Management** - Real cookies + CSRF tokens for login attempts  
-✅ **Connection Pooling** - Reuses connections to reduce impact  
+- ✅ **Account Lockout Detection** - Monitors HTTP 429, lockout messages, and WAF signatures
+- ✅ **Rate Limiting** - Token bucket algorithm with configurable requests per second
+- ✅ **Circuit Breaker** - Stops requests after repeated failures
+- ✅ **Safe Retries** - Exponential backoff applies only to GET and HEAD requests
+- ✅ **Redirect Boundaries** - Follows redirects only when the hostname remains unchanged
+- ✅ **Read-Only User Enumeration** - Never submits registration forms to test usernames
+- ✅ **Session Management** - Uses real cookies and CSRF tokens for login attempts
+- ✅ **Connection Pooling** - Reuses connections to reduce target impact
 
 ---
 
 ## 📊 Performance
 
-- **Joomla Detection:** < 500ms (cached responses)
-- **Full Enumeration:** 10-15 seconds (96 requests for 33 components)
-- **Password Attack:** ~3-5 seconds per password (depends on wordlist size)
-- **CVE Correlation:** < 1 second per version (disk-cached)
+Runtime depends on target latency, enabled checks, rate limits, retries, and
+wordlist sizes. JoomHound reports duration and HTTP request/error/retry counts
+in every scan result so performance can be evaluated against the actual target.
 
 ---
 
@@ -312,10 +281,14 @@ joomhound/
 - **[QUICKSTART.md](QUICKSTART.md)** - 5-minute getting started guide
 - **[INSTALLATION.md](INSTALLATION.md)** - Detailed setup and configuration
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Design patterns and modules
-- **[ATTACK_TECHNIQUES.md](ATTACK_TECHNIQUES.md)** - Exploitation methods
-- **[COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md)** - Comparison with other tools
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development guidelines
-- **[ROADMAP.md](ROADMAP.md)** - v1.1 and v2.0 features
+- **[PROJECT_STATUS.md](PROJECT_STATUS.md)** - Implemented features and known limitations
+- **[INDEX.md](INDEX.md)** - Documentation map and historical research labels
+
+---
+
+## 📄 License
+
+JoomHound is released under the [MIT License](LICENSE).
 
 ---
 
@@ -336,12 +309,12 @@ JoomHound builds upon the excellent work of:
 
 ## 📞 Support
 
-- **GitHub Issues:** https://github.com/w41l3r/joomhound/issues
-- **GitHub Discussions:** https://github.com/w41l3r/joomhound/discussions
-- **Email:** Report security issues responsibly
+- **Bugs and feature requests:** https://github.com/w41l3r/joomhound/issues
+- A private vulnerability-disclosure channel must be published before the
+  first community release; do not disclose security-sensitive details in a
+  public issue.
 
 ---
 
 **Created by:** [@w41l3r](https://github.com/w41l3r)  
-**License:** MIT  
 **Version:** 1.0.0

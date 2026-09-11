@@ -1,5 +1,9 @@
 # JoomHound Research & Architecture
 
+> **Historical planning document:** this material informed early development
+> and may mention proposed features that are not implemented. Current behavior
+> is documented in [PROJECT_STATUS.md](PROJECT_STATUS.md) and the CLI help.
+
 ## Competitive Analysis
 
 ### 1. **droopescan** (SamJoan)

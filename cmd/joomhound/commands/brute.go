@@ -4,23 +4,32 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/w41l3r/joomhound/internal/utils"
 	"github.com/spf13/cobra"
+	"github.com/w41l3r/joomhound/internal/utils"
 )
 
 var bruteCmd = &cobra.Command{
-	Use:   "brute -t <target> [flags]",
+	Use:   "brute --target <url> [flags]",
 	Short: "Enumerate users and test credentials against a Joomla installation",
 	Long: `Perform credential testing against a Joomla installation.
 
-User enumeration only reports a username when the target's response provably
-differs from a known-nonexistent-username baseline, so it does not report
-every candidate as valid.
+Pass the target with -t/--target as an absolute URL including its scheme.
+Paths and non-default ports are supported.
+
+User enumeration uses exact username matches from Joomla's unauthenticated
+public API. If that API is unavailable, enumeration is skipped; JoomHound
+never submits registration forms as a username-existence probe. Use
+-u/--user to test a username you already know.
 
 Password testing sends a real Joomla login (session cookie + CSRF token) and
-aborts automatically when account lockout, rate limiting or a WAF is detected.`,
-	Example: `  joomhound brute -t https://target.tld --users users.txt --passwords pass.txt
-  joomhound brute -t https://target.tld -u admin -p rockyou.txt --brute-delay 500`,
+aborts automatically when account lockout, rate limiting or a WAF is detected.
+
+If --users or --passwords is omitted, a small built-in list is used. This
+command makes real login attempts; review the selected users, wordlist,
+concurrency and rate limit before running it.`,
+	Example: `  joomhound brute -t https://target.example --users users.txt --passwords pass.txt
+  joomhound brute -t https://target.example:8443/joomla -u admin -p rockyou.txt --brute-delay 500`,
+	Args: targetCommandArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		target, _ := cmd.Flags().GetString("target")
 		outPath, _ := cmd.Flags().GetString("output")
@@ -66,16 +75,20 @@ aborts automatically when account lockout, rate limiting or a WAF is detected.`,
 			cfg.BruteDelay = time.Duration(delayMs) * time.Millisecond
 		}
 
-		return runScan(cmd, cfg, outPath, resolveFormat(cmd, outPath))
+		format, err := resolveFormat(cmd, outPath)
+		if err != nil {
+			return err
+		}
+		return runScan(cmd, cfg, outPath, format)
 	},
 }
 
 func init() {
 	f := bruteCmd.Flags()
-	f.StringP("target", "t", "", "target URL (required)")
-	f.String("users", "", "username wordlist for enumeration")
+	f.StringP("target", "t", "", targetFlagHelp)
+	f.String("users", "", "username wordlist for enumeration, one entry per line (default: small built-in list)")
 	f.StringP("user", "u", "", "test a single known username (skips enumeration)")
-	f.StringP("passwords", "p", "", "password wordlist")
+	f.StringP("passwords", "p", "", "password wordlist, one entry per line (default: small built-in list)")
 	f.StringP("output", "o", "", "output file (default: stdout)")
 	f.StringP("format", "f", "", "output format: text, json, xml, markdown")
 	f.BoolP("json", "j", false, "shorthand for --format json")

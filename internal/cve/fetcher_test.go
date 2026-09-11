@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -23,6 +26,13 @@ func (s *stubFetcher) Fetch(ctx context.Context, q Query) ([]Advisory, error) {
 	return s.advs, s.err
 }
 
+func TestQueryCacheKeyIncludesSchemaAndScope(t *testing.T) {
+	q := Query{Product: " Joomla ", Version: " 3.9.4 ", Component: " COM_FIELDS "}
+	if got, want := q.CacheKey(), "v2|joomla|3.9.4|com_fields"; got != want {
+		t.Fatalf("CacheKey = %q, want %q", got, want)
+	}
+}
+
 func TestMultiFetcherMergesProviders(t *testing.T) {
 	a := &stubFetcher{name: "a", advs: []Advisory{{ID: "CVE-2023-1", CVSS: 5.0, Source: "a"}}}
 	b := &stubFetcher{name: "b", advs: []Advisory{{ID: "CVE-2023-2", CVSS: 9.8, Source: "b"}}}
@@ -39,6 +49,37 @@ func TestMultiFetcherMergesProviders(t *testing.T) {
 	// Results are sorted by descending CVSS.
 	if got[0].ID != "CVE-2023-2" {
 		t.Fatalf("first advisory = %s, want CVE-2023-2 (highest CVSS)", got[0].ID)
+	}
+}
+
+func TestMultiFetcherAlwaysMergesOfflineSource(t *testing.T) {
+	online := &stubFetcher{name: "nvd", advs: []Advisory{
+		{ID: "CVE-SHARED", Source: "nvd", Description: "online"},
+	}}
+	offline := &stubFetcher{name: "offline", advs: []Advisory{
+		{ID: "CVE-SHARED", Source: "offline", Description: "more complete curated description"},
+		{ID: "CVE-OFFLINE-ONLY", Source: "offline", CVSS: 9.8},
+	}}
+
+	m := NewMultiFetcher([]CVEFetcher{online}, WithOfflineSource(offline))
+	got, err := m.Fetch(context.Background(), Query{Product: "joomla", Component: "com_fields"})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if offline.calls != 1 {
+		t.Fatalf("offline source called %d times, want 1", offline.calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d advisories, want merged and offline-only records", len(got))
+	}
+	var shared Advisory
+	for _, advisory := range got {
+		if advisory.ID == "CVE-SHARED" {
+			shared = advisory
+		}
+	}
+	if !strings.Contains(shared.Source, "nvd") || !strings.Contains(shared.Source, "offline") {
+		t.Fatalf("merged source = %q, want nvd and offline", shared.Source)
 	}
 }
 
@@ -242,6 +283,9 @@ func TestGitHubProviderParsesResponse(t *testing.T) {
     }]`
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("affects"); got != "joomla/joomla-cms@4.4.0" {
+			t.Errorf("affects = %q, want version-scoped package", got)
+		}
 		w.Write([]byte(payload))
 	}))
 	defer srv.Close()
@@ -265,5 +309,48 @@ func TestGitHubProviderParsesResponse(t *testing.T) {
 	}
 	if a.AffectsVersion("4.4.3") {
 		t.Error("4.4.3 is patched and should not match")
+	}
+}
+
+func TestGitHubProviderSkipsComponentQueries(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	p := NewGitHubProvider(WithGitHubBaseURL(srv.URL), WithGitHubHTTPClient(srv.Client()))
+	advs, err := p.Fetch(context.Background(), Query{Product: "joomla", Component: "com_fields"})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(advs) != 0 {
+		t.Fatalf("got %d advisories, want none", len(advs))
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("GitHub received %d component queries, want 0", got)
+	}
+}
+
+func TestNVDComponentScopeTakesPrecedenceOverVersion(t *testing.T) {
+	p := NewNVDProvider()
+	endpoint, err := p.buildURL(Query{
+		Product:   "joomla",
+		Version:   "3.9.4",
+		Component: "com_fields",
+	})
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	if got := u.Query().Get("keywordSearch"); got != "joomla com_fields" {
+		t.Fatalf("keywordSearch = %q, want component-scoped query", got)
+	}
+	if got := u.Query().Get("virtualMatchString"); got != "" {
+		t.Fatalf("virtualMatchString = %q, want it omitted for a component query", got)
 	}
 }

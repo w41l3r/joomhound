@@ -2,9 +2,7 @@ package bruteforce
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -104,18 +102,6 @@ func newAdminSession(ctx context.Context, base *http.Client, targetURL string) (
 		loginURL: loginURL,
 		token:    token,
 	}, nil
-}
-
-// randomToken returns a random hex string, used to build usernames and emails
-// that are guaranteed not to exist on the target.
-func randomToken(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand failing is effectively impossible; degrade rather than
-		// crash a running engagement.
-		return "jh0000000000"
-	}
-	return hex.EncodeToString(b)
 }
 
 // base64Return builds the base64 "return" parameter Joomla expects.

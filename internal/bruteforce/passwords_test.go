@@ -7,6 +7,7 @@ import (
 	nethttp "net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,6 +206,47 @@ func TestBruteForceAbortsOnLockout(t *testing.T) {
 	}
 	if n := pb.Attempts(); n > 20 {
 		t.Fatalf("made %d attempts after lockout; should have stopped promptly", n)
+	}
+}
+
+func TestBruteForceAbortsImmediatelyOnHTTP429(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.Method == nethttp.MethodGet {
+			w.Write([]byte(loginPage))
+			return
+		}
+		posts.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(nethttp.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	client, err := http.NewClient(http.ClientConfig{
+		EnableCookies:  true,
+		Timeout:        5 * time.Second,
+		MaxRetries:     3,
+		RetryBaseDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	pb := NewPasswordBruteforcer(client, 1)
+
+	start := time.Now()
+	_, err = pb.BruteForcePassword(context.Background(), srv.URL, "admin",
+		[]string{"one", "two", "three", "four"})
+	if !errors.Is(err, ErrAccountLockout) {
+		t.Fatalf("error = %v, want ErrAccountLockout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("HTTP 429 took %s to abort; Retry-After must not delay credential testing", elapsed)
+	}
+	if got := posts.Load(); got != 1 {
+		t.Fatalf("server saw %d login POSTs, want exactly 1", got)
+	}
+	if got := pb.Attempts(); got != 1 {
+		t.Fatalf("Attempts = %d, want 1", got)
 	}
 }
 

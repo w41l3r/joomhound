@@ -79,6 +79,14 @@ func (p *GitHubProvider) Name() string { return "github" }
 
 // Fetch implements CVEFetcher.
 func (p *GitHubProvider) Fetch(ctx context.Context, q Query) ([]Advisory, error) {
+	// GitHub's `affects` filter accepts package coordinates, not Joomla
+	// extension names. Querying the core package for a component would return
+	// unrelated core advisories and create false positives. The NVD keyword
+	// source and curated offline database handle component lookups instead.
+	if strings.TrimSpace(q.Component) != "" {
+		return nil, nil
+	}
+
 	if err := p.limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("github rate limiter: %w", err)
 	}
@@ -151,7 +159,11 @@ func (p *GitHubProvider) buildURL(q Query) (string, error) {
 
 	params := url.Values{}
 	params.Set("ecosystem", "composer")
-	params.Set("affects", pkg)
+	affects := pkg
+	if IsVersionComplete(q.Version) {
+		affects += "@" + strings.TrimSpace(q.Version)
+	}
+	params.Set("affects", affects)
 	params.Set("per_page", "100")
 	// Newest first so a truncated page still holds the most relevant records.
 	params.Set("sort", "published")

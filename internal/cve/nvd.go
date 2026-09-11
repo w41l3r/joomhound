@@ -153,11 +153,14 @@ func (p *NVDProvider) buildURL(q Query) (string, error) {
 	}
 
 	switch {
+	case strings.TrimSpace(q.Component) != "":
+		// Component scope takes precedence when both flags are present. The
+		// caller applies the version range afterwards, while a core CPE query
+		// here would discard the component constraint entirely.
+		params.Set("keywordSearch", product+" "+strings.TrimSpace(q.Component))
 	case IsVersionComplete(q.Version) && product == "joomla":
 		// The Joomla CPE product is literally "joomla\!".
 		params.Set("virtualMatchString", fmt.Sprintf(`cpe:2.3:a:joomla:joomla\!:%s`, q.Version))
-	case q.Component != "":
-		params.Set("keywordSearch", product+" "+q.Component)
 	default:
 		kw := product
 		if q.Version != "" {

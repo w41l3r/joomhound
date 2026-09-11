@@ -7,8 +7,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/w41l3r/joomhound/internal/cve"
 	"github.com/spf13/cobra"
+	"github.com/w41l3r/joomhound/internal/cve"
 )
 
 var cveCmd = &cobra.Command{
@@ -24,6 +24,7 @@ before an engagement where outbound access may be restricted.`,
   joomhound cve --component com_fields --online
   joomhound cve --purge-cache`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		stdout := cmd.OutOrStdout()
 		if purge, _ := cmd.Flags().GetBool("purge-cache"); purge {
 			dir, _ := cmd.Flags().GetString("cache-dir")
 			cache, err := cve.NewDiskCache(dir, 0)
@@ -33,7 +34,7 @@ before an engagement where outbound access may be restricted.`,
 			if err := cache.Purge(); err != nil {
 				return fmt.Errorf("purging cache: %w", err)
 			}
-			fmt.Printf("[+] CVE cache purged: %s\n", cache.Dir())
+			fmt.Fprintf(stdout, "[+] CVE cache purged: %s\n", cache.Dir())
 			return nil
 		}
 
@@ -74,11 +75,11 @@ before an engagement where outbound access may be restricted.`,
 		}
 
 		if len(advisories) == 0 {
-			fmt.Println("[-] No matching advisories found.")
+			fmt.Fprintln(stdout, "[-] No matching advisories found.")
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "CVE\tCVSS\tSEVERITY\tSOURCE\tTITLE")
 		fmt.Fprintln(w, "---\t----\t--------\t------\t-----")
 		for _, a := range advisories {
@@ -89,7 +90,7 @@ before an engagement where outbound access may be restricted.`,
 			return err
 		}
 
-		fmt.Printf("\n[+] %d advisories\n", len(advisories))
+		fmt.Fprintf(stdout, "\n[+] %d advisories\n", len(advisories))
 		return nil
 	},
 }
@@ -102,6 +103,12 @@ func buildStandaloneFetcher(cmd *cobra.Command, online bool) (cve.CVEFetcher, er
 
 	nvdKey, _ := cmd.Flags().GetString("nvd-api-key")
 	ghToken, _ := cmd.Flags().GetString("github-token")
+	if nvdKey == "" {
+		nvdKey = os.Getenv("NVD_API_KEY")
+	}
+	if ghToken == "" {
+		ghToken = os.Getenv("GITHUB_TOKEN")
+	}
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
 	ttlHours, _ := cmd.Flags().GetInt("cache-ttl")
 
@@ -111,15 +118,18 @@ func buildStandaloneFetcher(cmd *cobra.Command, online bool) (cve.CVEFetcher, er
 	}
 
 	opts := []cve.MultiFetcherOption{
-		cve.WithFallback(offline),
+		cve.WithOfflineSource(offline),
 		cve.WithTimeout(45 * time.Second),
 		cve.WithErrorHandler(func(provider string, err error) {
-			fmt.Fprintf(os.Stderr, "[!] %s: %v\n", provider, err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "[!] %s: %v\n", provider, err)
 		}),
 	}
 
 	if cache, err := cve.NewDiskCache(cacheDir, time.Duration(ttlHours)*time.Hour); err == nil {
 		opts = append(opts, cve.WithCache(cache))
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "[!] CVE disk cache unavailable, using memory cache: %v\n", err)
+		opts = append(opts, cve.WithCache(cve.NewMemoryCache(time.Duration(ttlHours)*time.Hour)))
 	}
 
 	return cve.NewMultiFetcher(providers, opts...), nil
